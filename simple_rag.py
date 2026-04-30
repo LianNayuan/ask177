@@ -161,7 +161,8 @@ class SimpleRAG:
         self._sources: list[str] = []
         self._file_names: list[str] = []
         self._file_mtimes: dict[str, float] = {}
-        self._titles: dict[str, str] = {}  # file name → extracted title
+        self._titles: dict[str, str] = {}      # file name → title
+        self._nicknames: dict[str, list[str]] = {}  # file name → nicknames
         self._retriever: TfidfRetriever | None = None
 
     # ── Build ────────────────────────────────────────────────────
@@ -184,6 +185,9 @@ class SimpleRAG:
             self._file_names.append(fp.name)
             title = self._extract_title(text) or fp.stem
             self._titles[fp.name] = title
+            nicks = self._extract_nicknames(text)
+            if nicks:
+                self._nicknames[fp.name] = nicks
             new_chunks = self._chunk(text, chunk_size, overlap)
             # Prepend title to each chunk so retriever + LLM know the source
             prefixed = [f"[{title}]\n{c}" for c in new_chunks]
@@ -198,9 +202,21 @@ class SimpleRAG:
         if not m:
             return None
         title = m.group(1).strip()
-        # Strip version suffix like " - 武器详情（Ver.9.3.0）"
         title = re.sub(r"\s*[-—–]\s*(完整)?武器详情.*$", "", title)
         return title
+
+    @staticmethod
+    def _extract_nicknames(text: str) -> list[str]:
+        """Extract nicknames (俗称) from the markdown, e.g. '俗称：红牙刷'."""
+        m = re.search(r"俗称[：:]\s*(.+)", text)
+        if not m:
+            return []
+        raw = m.group(1).strip()
+        if raw in ("—", "—", "-", "无", ""):
+            return []
+        # Split on Chinese/English commas and enumeration markers
+        parts = re.split(r"[、，,，]", raw)
+        return [p.strip() for p in parts if p.strip()]
 
     def _chunk(self, text: str, chunk_size: int, overlap: int) -> list[str]:
         """Split text into overlapping chunks, respecting paragraph boundaries."""
@@ -236,6 +252,7 @@ class SimpleRAG:
             "file_names": self._file_names,
             "file_mtimes": self._file_mtimes,
             "titles": self._titles,
+            "nicknames": self._nicknames,
             "retriever": self._retriever._state(),
         }
         with open(path, "wb") as f:
@@ -268,6 +285,7 @@ class SimpleRAG:
         self._file_names = data["file_names"]
         self._file_mtimes = data["file_mtimes"]
         self._titles = data.get("titles", {})
+        self._nicknames = data.get("nicknames", {})
         self._retriever = TfidfRetriever._from_state(data["retriever"])
         if self._verbose:
             print(f"[Cache] Loaded {len(self._chunks)} chunks from {path}")
@@ -287,12 +305,17 @@ class SimpleRAG:
     # ── Query ────────────────────────────────────────────────────
 
     def _find_relevant_files(self, question: str) -> set[str] | None:
-        """Stage 1: find files whose title appears in the question.
-        Returns None if no title matches (→ search all files)."""
+        """Stage 1: find files whose title or nickname appears in the question.
+        Returns None if no match (→ search all files)."""
         matches: set[str] = set()
         for fname, title in self._titles.items():
             if title and title in question:
                 matches.add(fname)
+        for fname, nicks in self._nicknames.items():
+            for nick in nicks:
+                if nick in question:
+                    matches.add(fname)
+                    break
         return matches if matches else None
 
     def ask(self, question: str, top_k: int = 14) -> str:
