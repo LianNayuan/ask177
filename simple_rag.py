@@ -161,8 +161,9 @@ class SimpleRAG:
         self._sources: list[str] = []
         self._file_names: list[str] = []
         self._file_mtimes: dict[str, float] = {}
-        self._titles: dict[str, str] = {}      # file name → title
-        self._nicknames: dict[str, list[str]] = {}  # file name → nicknames
+        self._titles: dict[str, str] = {}           # file name → title
+        self._nicknames: dict[str, list[str]] = {}   # file name → nicknames
+        self._glossary: dict[str, str] = {}          # slang → formal
         self._retriever: TfidfRetriever | None = None
 
     # ── Build ────────────────────────────────────────────────────
@@ -194,6 +195,32 @@ class SimpleRAG:
             self._chunks.extend(prefixed)
             self._sources.extend([fp.name] * len(prefixed))
         self._retriever = TfidfRetriever(self._chunks)
+
+    def load_glossary(self, path: str = "knowledge/glossary.md"):
+        """Load slang→formal mappings from a glossary file.
+        Format per line: 口语词 | 正式词"""
+        p = Path(path)
+        if not p.is_file():
+            return
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "|" in line:
+                slang, formal = line.split("|", 1)
+                self._glossary[slang.strip()] = formal.strip()
+        if self._verbose and self._glossary:
+            print(f"[Glossary] Loaded {len(self._glossary)} mappings")
+
+    def _rewrite_query(self, question: str) -> str:
+        """Replace slang terms in the question with formal equivalents."""
+        result = question
+        for slang, formal in self._glossary.items():
+            if slang in result:
+                result = result.replace(slang, formal)
+                if self._verbose:
+                    print(f"[Rewrite] '{slang}' → '{formal}'")
+        return result
 
     @staticmethod
     def _extract_title(text: str) -> str | None:
@@ -253,6 +280,7 @@ class SimpleRAG:
             "file_mtimes": self._file_mtimes,
             "titles": self._titles,
             "nicknames": self._nicknames,
+            "glossary": self._glossary,
             "retriever": self._retriever._state(),
         }
         with open(path, "wb") as f:
@@ -286,6 +314,7 @@ class SimpleRAG:
         self._file_mtimes = data["file_mtimes"]
         self._titles = data.get("titles", {})
         self._nicknames = data.get("nicknames", {})
+        self._glossary = data.get("glossary", {})
         self._retriever = TfidfRetriever._from_state(data["retriever"])
         if self._verbose:
             print(f"[Cache] Loaded {len(self._chunks)} chunks from {path}")
@@ -323,7 +352,10 @@ class SimpleRAG:
         if not self._retriever or not self._chunks:
             return "No documents loaded. Call .load() or .load_cache() first."
 
-        relevant = self._find_relevant_files(question)
+        # Rewrite slang → formal for better retrieval
+        search_query = self._rewrite_query(question)
+
+        relevant = self._find_relevant_files(search_query) or self._find_relevant_files(question)
         if self._verbose:
             if relevant:
                 print(f"[Title match] -> {relevant}")
@@ -331,7 +363,7 @@ class SimpleRAG:
                 print(f"[Title match] no match, searching all files")
 
         results = self._retriever.search_diverse(
-            question, self._sources, top_k=top_k, per_file=2,
+            search_query, self._sources, top_k=top_k, per_file=2,
             file_filter=relevant)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 

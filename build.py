@@ -10,6 +10,7 @@ from simple_rag import SimpleRAG, load_dotenv
 _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
 MD_DIR = "knowledge/wiki_cn"
+GLOSSARY_FILE = "knowledge/glossary.md"
 CACHE_FILE = "index.pkl"
 
 # ── Build ──────────────────────────────────────────────────────────
@@ -29,7 +30,9 @@ if __name__ == "__main__":
 
     print(f"Building index from {MD_DIR!r} ...")
     rag.load(MD_DIR)
-    print(f"  {len(rag._file_names)} files → {len(rag._chunks)} chunks")
+    rag.load_glossary(GLOSSARY_FILE)
+    print(f"  {len(rag._file_names)} files → {len(rag._chunks)} chunks"
+          f"  glossary: {len(rag._glossary)} entries")
 
     rag.save_cache(CACHE_FILE)
     print("Done. Run ask.py to start Q&A.")
