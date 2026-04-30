@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pytesseract; print\\('OK'\\)\")",
+      "Bash(python -c \"from PIL import Image; print\\('PIL OK'\\)\")",
+      "Bash(pip install *)",
+      "Bash(ls *.py)",
+      "Bash(ls *.pkl)",
+      "Bash(ls *.json)",
+      "Bash(python build.py)"
+    ]
+  }
+}

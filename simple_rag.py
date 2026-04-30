@@ -1,16 +1,18 @@
 """
 Simple RAG (Retrieval-Augmented Generation) framework.
-Reads .md files, retrieves relevant chunks, and answers questions using DeepSeek API.
+Core library: TfidfRetriever + SimpleRAG with pickle-based caching.
 """
 
 import math
 import os
+import pickle
 import re
-import sys
+import time
 from collections import Counter
 from pathlib import Path
 
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI
+
 
 # ── TF-IDF Retriever ──────────────────────────────────────────────
 
@@ -19,9 +21,9 @@ class TfidfRetriever:
 
     def __init__(self, chunks: list[str]):
         self.chunks = chunks
-        self._vocab: dict[str, int] = {}       # word → id
-        self._idf: dict[str, float] = {}       # word → idf
-        self._doc_vecs: list[dict[int, float]] = []  # per-chunk sparse tfidf
+        self._vocab: dict[str, int] = {}
+        self._idf: dict[str, float] = {}
+        self._doc_vecs: list[dict[int, float]] = []
         self._build()
 
     def _tokenize(self, text: str) -> list[str]:
@@ -29,17 +31,14 @@ class TfidfRetriever:
 
     def _build(self):
         tokenized = [self._tokenize(c) for c in self.chunks]
-        # vocabulary
         for tokens in tokenized:
             for t in tokens:
                 if t not in self._vocab:
                     self._vocab[t] = len(self._vocab)
         N = len(self.chunks)
-        # idf
         for word, wid in self._vocab.items():
             df = sum(1 for tokens in tokenized if word in tokens)
             self._idf[word] = math.log((N - df + 0.5) / (df + 0.5) + 1)
-        # tfidf vectors
         for tokens in tokenized:
             tf = Counter(tokens)
             total = len(tokens) or 1
@@ -74,7 +73,7 @@ class TfidfRetriever:
 
     def search_diverse(self, query: str, sources: list[str], top_k: int = 10,
                        per_file: int = 2) -> list[tuple[str, float]]:
-        """Retrieve top chunks while ensuring each file gets at least 1 slot,
+        """Retrieve top chunks while ensuring each source file gets at least 1 slot,
         then up to per_file, then fill with best remaining."""
         qv = self._query_vec(query)
         scored = [(c, self._dot(qv, dv), src)
@@ -112,6 +111,21 @@ class TfidfRetriever:
                 result.append((chunk, score))
         return result
 
+    # ── pickle helpers ───────────────────────────────────────────
+
+    def _state(self) -> dict:
+        return {"vocab": self._vocab, "idf": self._idf,
+                "doc_vecs": self._doc_vecs, "chunks": self.chunks}
+
+    @classmethod
+    def _from_state(cls, state: dict) -> "TfidfRetriever":
+        obj = cls.__new__(cls)
+        obj._vocab = state["vocab"]
+        obj._idf = state["idf"]
+        obj._doc_vecs = state["doc_vecs"]
+        obj.chunks = state["chunks"]
+        return obj
+
 
 # ── RAG Engine ────────────────────────────────────────────────────
 
@@ -120,8 +134,13 @@ class SimpleRAG:
     Simple RAG: load .md files → chunk → retrieve → answer with DeepSeek.
 
     Usage:
-        rag = SimpleRAG(api_key="...")
-        rag.load("docs/README.md")
+        rag = SimpleRAG()
+        rag.load("knowledge/")
+        rag.save_cache("index.pkl")
+
+        # later:
+        rag = SimpleRAG()
+        rag.load_cache("index.pkl")
         print(rag.ask("What is this project about?"))
     """
 
@@ -134,9 +153,12 @@ class SimpleRAG:
         self._verbose = verbose
         self._model = model
         self._chunks: list[str] = []
-        self._sources: list[str] = []  # file name per chunk
-        self._retriever: TfidfRetriever | None = None
+        self._sources: list[str] = []
         self._file_names: list[str] = []
+        self._file_mtimes: dict[str, float] = {}
+        self._retriever: TfidfRetriever | None = None
+
+    # ── Build ────────────────────────────────────────────────────
 
     def load(self, *paths: str, chunk_size: int = 500, overlap: int = 100):
         """Load .md files from paths (files or directories)."""
@@ -151,6 +173,7 @@ class SimpleRAG:
                 raise ValueError(f"Expected .md file or directory, got: {path}")
 
         for fp in files:
+            self._file_mtimes[str(fp)] = fp.stat().st_mtime
             text = fp.read_text(encoding="utf-8")
             self._file_names.append(fp.name)
             new_chunks = self._chunk(text, chunk_size, overlap)
@@ -172,7 +195,6 @@ class SimpleRAG:
             else:
                 if current:
                     chunks.append(current)
-                # sliding window with overlap
                 step = chunk_size - overlap
                 for i in range(0, len(para), step):
                     chunks.append(para[i : i + chunk_size])
@@ -181,24 +203,85 @@ class SimpleRAG:
             chunks.append(current)
         return [c for c in chunks if len(c) > 20]
 
+    # ── Cache ────────────────────────────────────────────────────
+
+    def save_cache(self, path: str = "index.pkl"):
+        """Save chunks and retriever state to a pickle file."""
+        if not self._retriever:
+            raise RuntimeError("No index built. Call .load() first.")
+        data = {
+            "chunks": self._chunks,
+            "sources": self._sources,
+            "file_names": self._file_names,
+            "file_mtimes": self._file_mtimes,
+            "retriever": self._retriever._state(),
+        }
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+        if self._verbose:
+            print(f"[Cache] Saved {len(self._chunks)} chunks to {path}")
+
+    def load_cache(self, path: str = "index.pkl") -> bool:
+        """Load cached chunks and retriever. Returns True if cache is fresh."""
+        if not Path(path).exists():
+            if self._verbose:
+                print(f"[Cache] No cache file at {path}")
+            return False
+
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+
+        # Check freshness: all source files unchanged
+        stale = []
+        for fpath, mtime in data.get("file_mtimes", {}).items():
+            if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
+                stale.append(fpath)
+        if stale:
+            if self._verbose:
+                print(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
+            return False
+
+        self._chunks = data["chunks"]
+        self._sources = data["sources"]
+        self._file_names = data["file_names"]
+        self._file_mtimes = data["file_mtimes"]
+        self._retriever = TfidfRetriever._from_state(data["retriever"])
+        if self._verbose:
+            print(f"[Cache] Loaded {len(self._chunks)} chunks from {path}")
+        return True
+
+    def is_fresh(self, cache_path: str = "index.pkl") -> bool:
+        """Check if cache exists and is up-to-date without loading."""
+        if not Path(cache_path).exists():
+            return False
+        with open(cache_path, "rb") as f:
+            mtimes = pickle.load(f).get("file_mtimes", {})
+        for fpath, mtime in mtimes.items():
+            if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
+                return False
+        return True
+
+    # ── Query ────────────────────────────────────────────────────
+
     def ask(self, question: str, top_k: int = 14) -> str:
         """Ask a question about the loaded documents."""
         if not self._retriever or not self._chunks:
-            return "No documents loaded. Call .load() first."
+            return "No documents loaded. Call .load() or .load_cache() first."
 
-        results = self._retriever.search_diverse(question, self._sources, top_k=top_k, per_file=2)
+        results = self._retriever.search_diverse(question, self._sources,
+                                                 top_k=top_k, per_file=2)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
         if self._verbose:
             print(f"[DEBUG] Query: {question}")
             for i, (chunk, score) in enumerate(results):
-                # use index in _chunks to find source
                 try:
                     idx = self._chunks.index(chunk)
                     src = self._sources[idx]
                 except ValueError:
                     src = "?"
-                print(f"[DEBUG]   [{i}] score={score:.4f}  file={src}  text={chunk[:80]}...")
+                print(f"[DEBUG]   [{i}] score={score:.4f}  file={src}  "
+                      f"text={chunk[:80]}...")
 
         prompt = (
             "You are a helpful assistant. Answer the user's question based ONLY on "
@@ -209,17 +292,27 @@ class SimpleRAG:
             "### Answer"
         )
 
-        resp = self._client.chat.completions.create(
-            model=self._model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.choices[0].message.content
+        for attempt in range(3):
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self._model,
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return resp.choices[0].message.content
+            except APIConnectionError:
+                if attempt < 2:
+                    wait = (attempt + 1) * 2
+                    if self._verbose:
+                        print(f"[Retry] Connection error, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
 
 
-# ── Helpers ────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────
 
-def _load_dotenv(path: str = ".env") -> dict[str, str]:
+def load_dotenv(path: str = ".env") -> dict[str, str]:
     """Load KEY=VALUE pairs from a .env file."""
     env: dict[str, str] = {}
     p = Path(path)
@@ -230,37 +323,3 @@ def _load_dotenv(path: str = ".env") -> dict[str, str]:
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
     return env
-
-
-# ── Config ─────────────────────────────────────────────────────────
-
-_env = _load_dotenv()
-API_KEY = _env.get("DEEPSEEK_API_KEY", "")
-MD_DIR = "knowledge/"
-VERBOSE = True
-
-# ── CLI ───────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    if not API_KEY:
-        print("Missing DEEPSEEK_API_KEY in .env file.")
-        sys.exit(1)
-
-    rag = SimpleRAG(api_key=API_KEY, verbose=VERBOSE)
-
-    print(f"=== Simple RAG (DeepSeek) ===\n")
-    rag.load(MD_DIR)
-    print(f"Loaded {len(rag._file_names)} file(s), {len(rag._chunks)} chunks\n")
-
-    while True:
-        try:
-            q = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye.")
-            break
-        if q.lower() in ("exit", "quit", "q"):
-            break
-        if not q:
-            continue
-        answer = rag.ask(q)
-        print(f"\n{answer}\n")
