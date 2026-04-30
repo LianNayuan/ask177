@@ -9,7 +9,7 @@ from simple_rag import SimpleRAG, load_dotenv
 
 _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
-MD_DIR = "knowledge/"
+MD_DIR = "knowledge/wiki_cn"
 CACHE_FILE = "index.pkl"
 
 # ── Build ──────────────────────────────────────────────────────────

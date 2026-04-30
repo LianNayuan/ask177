@@ -72,15 +72,20 @@ class TfidfRetriever:
         return scored[:top_k]
 
     def search_diverse(self, query: str, sources: list[str], top_k: int = 10,
-                       per_file: int = 2) -> list[tuple[str, float]]:
-        """Retrieve top chunks while ensuring each source file gets at least 1 slot,
-        then up to per_file, then fill with best remaining."""
+                       per_file: int = 2,
+                       file_filter: set[str] | None = None) -> list[tuple[str, float]]:
+        """Retrieve top chunks while ensuring each source file gets at least 1 slot.
+        If file_filter is given, only consider chunks from those files."""
         qv = self._query_vec(query)
         scored = [(c, self._dot(qv, dv), src)
                   for (c, dv), src in zip(zip(self.chunks, self._doc_vecs), sources)]
+        if file_filter:
+            scored = [(c, s, src) for c, s, src in scored if src in file_filter]
+            if not scored:
+                return []
         scored.sort(key=lambda x: x[1], reverse=True)
 
-        unique_files = set(sources)
+        unique_files = {src for _, _, src in scored}
         if len(unique_files) <= 1:
             return [(c, s) for c, s, _ in scored[:top_k]]
 
@@ -156,6 +161,7 @@ class SimpleRAG:
         self._sources: list[str] = []
         self._file_names: list[str] = []
         self._file_mtimes: dict[str, float] = {}
+        self._titles: dict[str, str] = {}  # file name → extracted title
         self._retriever: TfidfRetriever | None = None
 
     # ── Build ────────────────────────────────────────────────────
@@ -176,10 +182,25 @@ class SimpleRAG:
             self._file_mtimes[str(fp)] = fp.stat().st_mtime
             text = fp.read_text(encoding="utf-8")
             self._file_names.append(fp.name)
+            title = self._extract_title(text) or fp.stem
+            self._titles[fp.name] = title
             new_chunks = self._chunk(text, chunk_size, overlap)
-            self._chunks.extend(new_chunks)
-            self._sources.extend([fp.name] * len(new_chunks))
+            # Prepend title to each chunk so retriever + LLM know the source
+            prefixed = [f"[{title}]\n{c}" for c in new_chunks]
+            self._chunks.extend(prefixed)
+            self._sources.extend([fp.name] * len(prefixed))
         self._retriever = TfidfRetriever(self._chunks)
+
+    @staticmethod
+    def _extract_title(text: str) -> str | None:
+        """Extract the first # heading, trimmed to the part before ' - '."""
+        m = re.search(r"^#\s+(.+)", text, re.MULTILINE)
+        if not m:
+            return None
+        title = m.group(1).strip()
+        # Strip version suffix like " - 武器详情（Ver.9.3.0）"
+        title = re.sub(r"\s*[-—–]\s*(完整)?武器详情.*$", "", title)
+        return title
 
     def _chunk(self, text: str, chunk_size: int, overlap: int) -> list[str]:
         """Split text into overlapping chunks, respecting paragraph boundaries."""
@@ -214,6 +235,7 @@ class SimpleRAG:
             "sources": self._sources,
             "file_names": self._file_names,
             "file_mtimes": self._file_mtimes,
+            "titles": self._titles,
             "retriever": self._retriever._state(),
         }
         with open(path, "wb") as f:
@@ -245,6 +267,7 @@ class SimpleRAG:
         self._sources = data["sources"]
         self._file_names = data["file_names"]
         self._file_mtimes = data["file_mtimes"]
+        self._titles = data.get("titles", {})
         self._retriever = TfidfRetriever._from_state(data["retriever"])
         if self._verbose:
             print(f"[Cache] Loaded {len(self._chunks)} chunks from {path}")
@@ -263,13 +286,30 @@ class SimpleRAG:
 
     # ── Query ────────────────────────────────────────────────────
 
+    def _find_relevant_files(self, question: str) -> set[str] | None:
+        """Stage 1: find files whose title appears in the question.
+        Returns None if no title matches (→ search all files)."""
+        matches: set[str] = set()
+        for fname, title in self._titles.items():
+            if title and title in question:
+                matches.add(fname)
+        return matches if matches else None
+
     def ask(self, question: str, top_k: int = 14) -> str:
         """Ask a question about the loaded documents."""
         if not self._retriever or not self._chunks:
             return "No documents loaded. Call .load() or .load_cache() first."
 
-        results = self._retriever.search_diverse(question, self._sources,
-                                                 top_k=top_k, per_file=2)
+        relevant = self._find_relevant_files(question)
+        if self._verbose:
+            if relevant:
+                print(f"[Title match] -> {relevant}")
+            else:
+                print(f"[Title match] no match, searching all files")
+
+        results = self._retriever.search_diverse(
+            question, self._sources, top_k=top_k, per_file=2,
+            file_filter=relevant)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
         if self._verbose:

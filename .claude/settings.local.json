@@ -7,7 +7,9 @@
       "Bash(ls *.py)",
       "Bash(ls *.pkl)",
       "Bash(ls *.json)",
-      "Bash(python build.py)"
+      "Bash(python build.py)",
+      "Bash(python -c ' *)",
+      "Bash(git rm *)"
     ]
   }
 }
