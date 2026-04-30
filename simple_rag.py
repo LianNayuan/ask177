@@ -72,8 +72,10 @@ class TfidfRetriever:
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
-    def search_diverse(self, query: str, sources: list[str], top_k: int = 5) -> list[tuple[str, float]]:
-        """Retrieve top chunks while ensuring each source file gets at least one slot."""
+    def search_diverse(self, query: str, sources: list[str], top_k: int = 10,
+                       per_file: int = 2) -> list[tuple[str, float]]:
+        """Retrieve top chunks while ensuring each file gets at least 1 slot,
+        then up to per_file, then fill with best remaining."""
         qv = self._query_vec(query)
         scored = [(c, self._dot(qv, dv), src)
                   for (c, dv), src in zip(zip(self.chunks, self._doc_vecs), sources)]
@@ -84,15 +86,25 @@ class TfidfRetriever:
             return [(c, s) for c, s, _ in scored[:top_k]]
 
         result: list[tuple[str, float]] = []
-        seen_files: set[str] = set()
-        # first pass: pick the best chunk from each file
+        file_counts: dict[str, int] = {f: 0 for f in unique_files}
+
+        # Round 1: ensure every file has 1 chunk
         for chunk, score, src in scored:
-            if src not in seen_files:
+            if file_counts[src] == 0:
                 result.append((chunk, score))
-                seen_files.add(src)
-                if len(seen_files) == len(unique_files):
+                file_counts[src] = 1
+                if len(result) == len(unique_files):
                     break
-        # second pass: fill remaining slots with best remaining chunks
+
+        # Round 2: add extra chunks up to per_file per file
+        for chunk, score, src in scored:
+            if len(result) >= top_k:
+                break
+            if file_counts[src] < per_file:
+                result.append((chunk, score))
+                file_counts[src] += 1
+
+        # Round 3: fill remaining slots
         for chunk, score, src in scored:
             if len(result) >= top_k:
                 break
@@ -127,16 +139,23 @@ class SimpleRAG:
         self._file_names: list[str] = []
 
     def load(self, *paths: str, chunk_size: int = 500, overlap: int = 100):
-        """Load one or more .md files and index them."""
+        """Load .md files from paths (files or directories)."""
+        files: list[Path] = []
         for path in paths:
             p = Path(path)
-            if not p.suffix == ".md":
-                raise ValueError(f"Only .md files are supported, got: {p.suffix}")
-            text = p.read_text(encoding="utf-8")
-            self._file_names.append(p.name)
+            if p.is_dir():
+                files.extend(sorted(p.rglob("*.md")))
+            elif p.suffix == ".md":
+                files.append(p)
+            else:
+                raise ValueError(f"Expected .md file or directory, got: {path}")
+
+        for fp in files:
+            text = fp.read_text(encoding="utf-8")
+            self._file_names.append(fp.name)
             new_chunks = self._chunk(text, chunk_size, overlap)
             self._chunks.extend(new_chunks)
-            self._sources.extend([p.name] * len(new_chunks))
+            self._sources.extend([fp.name] * len(new_chunks))
         self._retriever = TfidfRetriever(self._chunks)
 
     def _chunk(self, text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -162,12 +181,12 @@ class SimpleRAG:
             chunks.append(current)
         return [c for c in chunks if len(c) > 20]
 
-    def ask(self, question: str, top_k: int = 5) -> str:
+    def ask(self, question: str, top_k: int = 14) -> str:
         """Ask a question about the loaded documents."""
         if not self._retriever or not self._chunks:
             return "No documents loaded. Call .load() first."
 
-        results = self._retriever.search_diverse(question, self._sources, top_k=top_k)
+        results = self._retriever.search_diverse(question, self._sources, top_k=top_k, per_file=2)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
         if self._verbose:
@@ -198,26 +217,40 @@ class SimpleRAG:
         return resp.choices[0].message.content
 
 
-# ── CLI ───────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────
 
-# ── Config (hardcode your key and file paths here) ─────────────────
+def _load_dotenv(path: str = ".env") -> dict[str, str]:
+    """Load KEY=VALUE pairs from a .env file."""
+    env: dict[str, str] = {}
+    p = Path(path)
+    if p.is_file():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
 
 
-MD_FILES = ["顶尖射击枪.md","广域标记枪.md"]  # add more .md files here
-VERBOSE = False
+# ── Config ─────────────────────────────────────────────────────────
+
+_env = _load_dotenv()
+API_KEY = _env.get("DEEPSEEK_API_KEY", "")
+MD_DIR = "knowledge/"
+VERBOSE = True
 
 # ── CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if not API_KEY:
-        print("Set API_KEY in the script.")
+        print("Missing DEEPSEEK_API_KEY in .env file.")
         sys.exit(1)
 
     rag = SimpleRAG(api_key=API_KEY, verbose=VERBOSE)
 
     print(f"=== Simple RAG (DeepSeek) ===\n")
-    rag.load(*MD_FILES)
-    print(f"Loaded {len(MD_FILES)} file(s), {len(rag._chunks)} chunks\n")
+    rag.load(MD_DIR)
+    print(f"Loaded {len(rag._file_names)} file(s), {len(rag._chunks)} chunks\n")
 
     while True:
         try:
