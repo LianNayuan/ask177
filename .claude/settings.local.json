@@ -19,7 +19,9 @@
       "Bash(sed -n '5,8p' \"d:/run/ask177/knowledge/wiki_cn/新叶射击枪.md\")",
       "Bash(sed -n '5,8p' \"d:/run/ask177/knowledge/wiki_cn/广域标记枪 新型.md\")",
       "Bash(python crawl.py 1-300)",
-      "Bash(python crawl.py 192)"
+      "Bash(python crawl.py 192)",
+      "Bash(git -C d:/run/ask177 status --short)",
+      "Bash(git -C d:/run/ask177 log --oneline -10)"
     ]
   }
 }
