@@ -15,7 +15,7 @@ from simple_rag import SimpleRAG, load_dotenv
 
 _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
-MD_DIR = "knowledge/wiki_cn"
+MD_DIRS = ["knowledge/wiki_cn", "knowledge/picture_ocr"]
 GLOSSARY_FILE = "knowledge/glossary.md"
 CACHE_FILE = "index.pkl"
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
             rag.load_glossary(GLOSSARY_FILE)
             glossary_reloaded = True
 
-        updated = rag.incremental_update(MD_DIR)
+        updated = rag.incremental_update(*MD_DIRS)
 
         if not updated and not glossary_reloaded:
             print(f"Cache is up-to-date ({CACHE_FILE}). Nothing to build.")
@@ -83,8 +83,8 @@ if __name__ == "__main__":
     if force_files:
         print("Warning: --file has no effect on first build (no cache exists).")
 
-    print(f"Building index from {MD_DIR!r} ...")
-    rag.load(MD_DIR)
+    print(f"Building index from {MD_DIRS} ...")
+    rag.load(*MD_DIRS)
     rag.load_glossary(GLOSSARY_FILE)
     print(f"  {len(rag._file_names)} files → {len(rag._chunks)} chunks"
           f"  glossary: {len(rag._glossary)} entries")

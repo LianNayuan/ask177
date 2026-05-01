@@ -1,4 +1,10 @@
-"""Q&A interface: load cached index → ask questions."""
+"""Q&A interface: load cached index → ask questions.
+
+Usage:
+  python ask.py              # verbose mode (title/rewrite logs, no chunk dump)
+  python ask.py --debug       # verbose + per-chunk retrieval dump
+  python ask.py -q            # quiet mode (only answers, no logs)
+"""
 
 import sys
 from pathlib import Path
@@ -11,7 +17,6 @@ _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
 CACHE_FILE = "index.pkl"
 GLOSSARY_FILE = "knowledge/glossary.md"
-VERBOSE = False
 
 
 def _save_glossary(glossary: dict[str, str], path: str):
@@ -29,7 +34,19 @@ if __name__ == "__main__":
         print("Missing DEEPSEEK_API_KEY in .env file.")
         sys.exit(1)
 
-    rag = SimpleRAG(api_key=API_KEY, verbose=VERBOSE)
+    # Parse flags
+    verbose = True
+    debug_chunks = False
+    for a in sys.argv[1:]:
+        if a == "--debug":
+            debug_chunks = True
+        elif a == "-q":
+            verbose = False
+        else:
+            print(f"Unknown argument: {a}")
+            sys.exit(1)
+
+    rag = SimpleRAG(api_key=API_KEY, verbose=verbose)
 
     if not rag.load_cache(CACHE_FILE):
         print("No cache found. Run build.py first.")
@@ -82,5 +99,5 @@ if __name__ == "__main__":
             continue
 
         # ── Ask ───────────────────────────────────────────────────
-        answer = rag.ask(q)
+        answer = rag.ask(q, debug_chunks=debug_chunks)
         print(f"\n{answer}\n")

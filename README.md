@@ -151,7 +151,7 @@ python server.py --host 0.0.0.0 --port 8000 --cache index.pkl
 | `knowledge/wiki_cn/` | 167 个武器知识 .md 文件 |
 | `knowledge/glossary.md` | 俗称 → 正式名映射表 |
 | `requirements.txt` | Python 依赖 |
-
+superpower
 ## 当前的 todo
 
 - [ ] 知识库内容还需要校对（部分武器数据可能有误）

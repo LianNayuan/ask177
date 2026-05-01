@@ -195,6 +195,7 @@ class SimpleRAG:
             self._chunks.extend(prefixed)
             self._sources.extend([fp.name] * len(prefixed))
         self._retriever = TfidfRetriever(self._chunks)
+        self._merge_table_nicknames()
 
     def load_glossary(self, path: str = "knowledge/glossary.md"):
         """Load slang→formal mappings from a glossary file.
@@ -220,6 +221,8 @@ class SimpleRAG:
                 result = result.replace(slang, formal)
                 if self._verbose:
                     print(f"[Rewrite] '{slang}' → '{formal}'")
+        if self._verbose and result != question:
+            print(f"[Rewrite] 最终: {question!r} → {result!r}")
         return result
 
     @staticmethod
@@ -244,6 +247,78 @@ class SimpleRAG:
         # Split on Chinese/English commas and enumeration markers
         parts = re.split(r"[、，,，]", raw)
         return [p.strip() for p in parts if p.strip()]
+
+    @staticmethod
+    def _parse_nickname_table(text: str) -> dict[str, list[str]]:
+        """Parse a markdown table (官中译名 | 俗称 | ...) → {official: [nicknames]}."""
+        result: dict[str, list[str]] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("|--") or line.startswith("|---"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            # Table row: | col1 | col2 | col3 |
+            if len(parts) < 4:
+                continue
+            official = parts[1]
+            nickname = parts[2]
+            if not official or not nickname:
+                continue
+            if official in ("官中译名", "官中译名"):
+                continue
+            nicks = [n.strip() for n in re.split(r"\s*/\s*", nickname) if n.strip()]
+            if official not in result:
+                result[official] = []
+            for n in nicks:
+                if n not in result[official]:
+                    result[official].append(n)
+        return result
+
+    def _merge_table_nicknames(self) -> int:
+        """If 武器俗称及来源.md was loaded, parse its table and merge nicknames.
+        Returns number of newly added nicknames."""
+        # Find the table file among loaded files
+
+        table_fp = None
+        for fp_str in self._file_mtimes:
+            if Path(fp_str).name == "武器俗称及来源.md":
+                table_fp = Path(fp_str)
+                break
+        if not table_fp or not table_fp.is_file():
+            if self._verbose:
+                print("[Nickname table] 武器俗称及来源.md not found in loaded files, skip")
+            return 0
+
+        table_data = self._parse_nickname_table(table_fp.read_text(encoding="utf-8"))
+        if not table_data:
+            if self._verbose:
+                print("[Nickname table] Table parsed but no data extracted")
+            return 0
+
+        title_to_fname = {title: fname for fname, title in self._titles.items()}
+        merged = 0
+        skipped = 0
+        for official, nicks in table_data.items():
+            fname = title_to_fname.get(official)
+            if not fname:
+                if self._verbose:
+                    print(f"[Nickname table] SKIP '{official}': no matching file title in {sorted(self._titles.values())[:5]}...")
+                skipped += 1
+                continue
+            existing = set(self._nicknames.get(fname, []))
+            new = [n for n in nicks if n not in existing]
+            if new:
+                self._nicknames[fname] = list(existing | set(nicks))
+                if self._verbose:
+                    print(f"[Nickname table] '{fname}' +{new} (was {list(existing)})")
+                merged += len(new)
+        if self._verbose:
+            print(f"[Nickname table] Merged {merged} new nicknames,"
+                  f" {skipped} table rows unmatched, {len(table_data)} total rows")
+        else:
+            print(f"[Nickname table] Merged {merged} new nicknames"
+                  f" ({skipped} rows unmatched, {len(table_data)} total)")
+        return merged
 
     def _chunk(self, text: str, chunk_size: int, overlap: int) -> list[str]:
         """Split text into overlapping chunks, respecting paragraph boundaries."""
@@ -292,7 +367,7 @@ class SimpleRAG:
                     if current[fp].stat().st_mtime > self._file_mtimes[fp] + 0.1}
 
         if not (added or deleted or modified):
-            return False
+            return self._merge_table_nicknames() > 0  # True only if table added nicknames
 
         # 2. Remove chunks from deleted and modified files
         removed_names = {Path(fp).name for fp in (deleted | modified)}
@@ -329,6 +404,7 @@ class SimpleRAG:
 
         # 4. Rebuild TF-IDF from all chunks
         self._retriever = TfidfRetriever(self._chunks)
+        self._merge_table_nicknames()
 
         if self._verbose:
             print(f"[Incremental] +{len(added)} ~{len(modified)} -{len(deleted)} files, "
@@ -409,15 +485,19 @@ class SimpleRAG:
         matches: set[str] = set()
         for fname, title in self._titles.items():
             if title and title in question:
+                if self._verbose:
+                    print(f"[Title match] title '{title}' in question → {fname}")
                 matches.add(fname)
         for fname, nicks in self._nicknames.items():
             for nick in nicks:
                 if nick in question:
+                    if self._verbose:
+                        print(f"[Title match] nickname '{nick}' in question → {fname}")
                     matches.add(fname)
                     break
         return matches if matches else None
 
-    def ask(self, question: str, top_k: int = 14) -> str:
+    def ask(self, question: str, top_k: int = 14, debug_chunks: bool = False) -> str:
         """Ask a question about the loaded documents."""
         if not self._retriever or not self._chunks:
             return "No documents loaded. Call .load() or .load_cache() first."
@@ -426,6 +506,17 @@ class SimpleRAG:
         search_query = self._rewrite_query(question)
 
         relevant = self._find_relevant_files(search_query) or self._find_relevant_files(question)
+
+        # Always include reference files so cross-cutting info (nickname origins, etc.)
+        # isn't excluded when a specific weapon is matched
+        for ref in self._file_names:
+            if ref == "武器俗称及来源.md" and (relevant is None or ref not in relevant):
+                if relevant is None:
+                    relevant = set()
+                relevant.add(ref)
+                if self._verbose:
+                    print(f"[Title match] also including reference file: {ref}")
+
         if self._verbose:
             if relevant:
                 print(f"[Title match] -> {relevant}")
@@ -437,7 +528,7 @@ class SimpleRAG:
             file_filter=relevant)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
-        if self._verbose:
+        if debug_chunks:
             print(f"[DEBUG] Query: {question}")
             for i, (chunk, score) in enumerate(results):
                 try:
