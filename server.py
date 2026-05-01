@@ -5,19 +5,26 @@ Usage:
   python server.py --port 8080            # custom port
   python server.py --host 127.0.0.1       # local only
   python server.py --cache index.pkl      # custom cache path
+
+When packaged with PyInstaller, place index.pkl and .env next to the .exe.
 """
 
 import sys
 from pathlib import Path
 
+# When frozen by PyInstaller, find files next to the .exe, not next to the script
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).parent
+else:
+    APP_DIR = Path(__file__).parent
+
 from simple_rag import SimpleRAG, load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────
 
-_env = load_dotenv()
+_env = load_dotenv(str(APP_DIR / ".env"))
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
-CACHE_FILE = "index.pkl"
-GLOSSARY_FILE = "knowledge/glossary.md"
+CACHE_FILE = str(APP_DIR / "index.pkl")
 
 # ── FastAPI app (lazy init, after argparse) ────────────────────────
 

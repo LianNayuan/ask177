@@ -3,3 +3,8 @@ index.pkl
 __pycache__/
 *.pyc
 todo.md
+
+# PyInstaller
+dist/
+build/
+*.spec
