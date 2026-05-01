@@ -1,4 +1,10 @@
-"""Build index: load files → chunk → cache to disk. Run once, or when files change."""
+"""Build index: load files → chunk → cache to disk. Run once, or when files change.
+
+Usage:
+  python build.py              # auto-detect changed files, incremental update
+  python build.py --file X.md  # force re-process specific file(s)
+  python build.py -f X.md Y.md # same, multiple files
+"""
 
 import sys
 from pathlib import Path
@@ -20,13 +26,62 @@ if __name__ == "__main__":
         print("Missing DEEPSEEK_API_KEY in .env file.")
         sys.exit(1)
 
+    # Parse --file / -f
+    force_files: list[str] = []
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] in ("--file", "-f") and i + 1 < len(args):
+            force_files.append(args[i + 1])
+            i += 2
+        else:
+            print(f"Unknown argument: {args[i]}")
+            sys.exit(1)
+
     rag = SimpleRAG(api_key=API_KEY, verbose=True)
 
-    # Check if cache is fresh
-    if rag.is_fresh(CACHE_FILE):
-        print(f"Cache is up-to-date ({CACHE_FILE}). Nothing to build.")
-        print("Delete index.pkl or modify source files to force rebuild.")
+    # ── Incremental update (cache exists) ──────────────────────────
+    if Path(CACHE_FILE).exists():
+        rag.load_cache(CACHE_FILE, force=True)
+
+        # Mark forced files as "modified" so incremental_update reprocesses them
+        for fname in force_files:
+            matched: list[str] = []
+            for fp in rag._file_mtimes:
+                fp_name = Path(fp).name
+                fp_stem = Path(fp).stem
+                if fname in (fp, fp_name, fp_stem, fp_name.replace(".md", ""),
+                             f"{fname}.md", f"knowledge/wiki_cn/{fname}"):
+                    matched.append(fp)
+            if not matched:
+                print(f"Warning: '{fname}' not found in cache, skipping.")
+            for fp in matched:
+                rag._file_mtimes[fp] = 0  # force reprocess
+
+        # Reload glossary if it changed since the cache was built
+        glossary_reloaded = False
+        glossary_path = Path(GLOSSARY_FILE)
+        cache_mtime = Path(CACHE_FILE).stat().st_mtime
+        if glossary_path.exists() and glossary_path.stat().st_mtime > cache_mtime + 0.1:
+            rag._glossary = {}
+            rag.load_glossary(GLOSSARY_FILE)
+            glossary_reloaded = True
+
+        updated = rag.incremental_update(MD_DIR)
+
+        if not updated and not glossary_reloaded:
+            print(f"Cache is up-to-date ({CACHE_FILE}). Nothing to build.")
+            print("Use --file <name> to force re-process a specific file,"
+                  " or delete index.pkl for a full rebuild.")
+            sys.exit(0)
+
+        rag.save_cache(CACHE_FILE)
+        print("Done (incremental). Run ask.py to start Q&A.")
         sys.exit(0)
+
+    # ── Full build (no cache exists) ───────────────────────────────
+    if force_files:
+        print("Warning: --file has no effect on first build (no cache exists).")
 
     print(f"Building index from {MD_DIR!r} ...")
     rag.load(MD_DIR)

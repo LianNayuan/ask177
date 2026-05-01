@@ -267,6 +267,74 @@ class SimpleRAG:
             chunks.append(current)
         return [c for c in chunks if len(c) > 20]
 
+    # ── Incremental update ───────────────────────────────────────
+
+    def incremental_update(self, *paths: str, chunk_size: int = 500,
+                           overlap: int = 100) -> bool:
+        """Update only changed/new/deleted files, then rebuild retriever.
+        Returns True if anything was updated, False if nothing changed."""
+        # 1. Discover current files on disk
+        current: dict[str, Path] = {}
+        for path in paths:
+            p = Path(path)
+            if p.is_dir():
+                for fp in sorted(p.rglob("*.md")):
+                    current[str(fp)] = fp
+            elif p.suffix == ".md":
+                current[str(p)] = p
+
+        old_paths = set(self._file_mtimes.keys())
+        new_paths = set(current.keys())
+
+        added = new_paths - old_paths
+        deleted = old_paths - new_paths
+        modified = {fp for fp in (new_paths & old_paths)
+                    if current[fp].stat().st_mtime > self._file_mtimes[fp] + 0.1}
+
+        if not (added or deleted or modified):
+            return False
+
+        # 2. Remove chunks from deleted and modified files
+        removed_names = {Path(fp).name for fp in (deleted | modified)}
+        if removed_names:
+            keep = [(c, s) for c, s in zip(self._chunks, self._sources)
+                    if s not in removed_names]
+            self._chunks = [c for c, _ in keep]
+            self._sources = [s for _, s in keep]
+            self._file_names = [n for n in self._file_names if n not in removed_names]
+            for fp in deleted | modified:
+                self._file_mtimes.pop(fp, None)
+                name = Path(fp).name
+                self._titles.pop(name, None)
+                self._nicknames.pop(name, None)
+
+        # 3. Add/re-add chunks from added and modified files
+        for fp_str in sorted(added | modified):
+            fp = current[fp_str]
+            self._file_mtimes[fp_str] = fp.stat().st_mtime
+            text = fp.read_text(encoding="utf-8")
+            if fp.name not in self._file_names:
+                self._file_names.append(fp.name)
+            title = self._extract_title(text) or fp.stem
+            self._titles[fp.name] = title
+            nicks = self._extract_nicknames(text)
+            if nicks:
+                self._nicknames[fp.name] = nicks
+            else:
+                self._nicknames.pop(fp.name, None)
+            new_chunks = self._chunk(text, chunk_size, overlap)
+            prefixed = [f"[{title}]\n{c}" for c in new_chunks]
+            self._chunks.extend(prefixed)
+            self._sources.extend([fp.name] * len(prefixed))
+
+        # 4. Rebuild TF-IDF from all chunks
+        self._retriever = TfidfRetriever(self._chunks)
+
+        if self._verbose:
+            print(f"[Incremental] +{len(added)} ~{len(modified)} -{len(deleted)} files, "
+                  f"{len(self._chunks)} chunks total")
+        return True
+
     # ── Cache ────────────────────────────────────────────────────
 
     def save_cache(self, path: str = "index.pkl"):
@@ -288,8 +356,10 @@ class SimpleRAG:
         if self._verbose:
             print(f"[Cache] Saved {len(self._chunks)} chunks to {path}")
 
-    def load_cache(self, path: str = "index.pkl") -> bool:
-        """Load cached chunks and retriever. Returns True if cache is fresh."""
+    def load_cache(self, path: str = "index.pkl", force: bool = False) -> bool:
+        """Load cached chunks and retriever. Returns True if cache was loaded.
+        With force=False (default), returns False if any source file changed.
+        With force=True, loads anyway so incremental_update can fix stale entries."""
         if not Path(path).exists():
             if self._verbose:
                 print(f"[Cache] No cache file at {path}")
@@ -303,7 +373,7 @@ class SimpleRAG:
         for fpath, mtime in data.get("file_mtimes", {}).items():
             if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
                 stale.append(fpath)
-        if stale:
+        if stale and not force:
             if self._verbose:
                 print(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
             return False

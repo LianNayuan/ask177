@@ -9,7 +9,17 @@
       "Bash(ls *.json)",
       "Bash(python build.py)",
       "Bash(python -c ' *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(python crawl.py 208)",
+      "Bash(python crawl.py 140)",
+      "Bash(git checkout *)",
+      "Bash(curl -s -L -H \"User-Agent: Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" -H \"Accept: application/json\" \"https://splatoon.com.cn/api/datasource/weapon/weapon/detail/141\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(repr\\(d['data']['contents'][1]['content'][:300]\\)\\)\")",
+      "Bash(python crawl.py 141 knowledge/wiki_cn)",
+      "Bash(sed -n '5,8p' \"d:/run/ask177/knowledge/wiki_cn/新叶射击枪.md\")",
+      "Bash(sed -n '5,8p' \"d:/run/ask177/knowledge/wiki_cn/广域标记枪 新型.md\")",
+      "Bash(python crawl.py 1-300)",
+      "Bash(python crawl.py 192)"
     ]
   }
 }

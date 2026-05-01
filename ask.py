@@ -11,7 +11,7 @@ _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
 CACHE_FILE = "index.pkl"
 GLOSSARY_FILE = "knowledge/glossary.md"
-VERBOSE = True
+VERBOSE = False
 
 
 def _save_glossary(glossary: dict[str, str], path: str):
