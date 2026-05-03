@@ -53,11 +53,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Show retrieval mode
-    if rag._dense_retriever is not None:
+    if rag._chroma_retriever is not None:
+        mode = f"TF-IDF + Dense/ChromaDB ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
+    elif rag._dense_retriever is not None:
         mode = f"TF-IDF + Dense ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
     else:
         mode = "TF-IDF only (no dense embeddings)"
-        print("  Hint: run 'python build_embeddings.py' for semantic search.")
+        print("  Hint: run 'python build_embeddings.py --chroma' for semantic search.")
 
     print(f"\n=== RAG Q&A (DeepSeek) ===\n"
           f"{len(rag._file_names)} files, {len(rag._chunks)} chunks\n"

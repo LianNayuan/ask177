@@ -28,7 +28,8 @@
       "Bash(python -c \"from openai import OpenAI; c = OpenAI\\(api_key='sk-test', base_url='https://api.deepseek.com'\\); print\\(dir\\(c.embeddings\\)\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); py_compile.compile\\('build_tfidf.py', doraise=True\\); py_compile.compile\\('build_embeddings.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(git mv *)",
-      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); py_compile.compile\\('build_embeddings.py', doraise=True\\); py_compile.compile\\('ask.py', doraise=True\\); print\\('OK'\\)\")"
     ]
   }
 }

@@ -199,6 +199,92 @@ class DenseRetriever:
         return obj
 
 
+# ── ChromaDB Retriever ────────────────────────────────────────────
+
+class ChromaRetriever:
+    """Dense retriever backed by ChromaDB for persistent vector storage."""
+
+    def __init__(self, chunks: list[str] | None = None,
+                 embeddings: list[list[float]] | None = None,
+                 sources: list[str] | None = None,
+                 persist_dir: str = "chroma_db",
+                 collection_name: str = "weapons"):
+        import chromadb
+        self._persist_dir = persist_dir
+        self._collection_name = collection_name
+        self.chunks = chunks or []
+
+        self._client = chromadb.PersistentClient(path=persist_dir)
+
+        try:
+            self._collection = self._client.get_collection(collection_name)
+        except Exception:
+            self._collection = self._client.create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+            if chunks and embeddings:
+                self._add_batch(chunks, embeddings, sources or [])
+
+    def _add_batch(self, chunks: list[str], embeddings: list[list[float]],
+                   sources: list[str], batch_size: int = 200):
+        ids = [str(i) for i in range(len(chunks))]
+        metas = [{"source": sources[i]} if i < len(sources) else {}
+                 for i in range(len(chunks))]
+        for i in range(0, len(chunks), batch_size):
+            end = min(i + batch_size, len(chunks))
+            self._collection.add(
+                ids=ids[i:end],
+                documents=chunks[i:end],
+                embeddings=embeddings[i:end],
+                metadatas=metas[i:end],
+            )
+
+    def score_all(self, query_embedding: list[float]) -> list[float]:
+        """Return cosine similarity scores for all chunks (for hybrid fusion)."""
+        results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=len(self.chunks),
+            include=["distances"],
+        )
+        # cosine space: distance = 1 - similarity  →  similarity = 1 - distance
+        distances = results["distances"][0]
+        ids = results["ids"][0]
+        scores = [0.0] * len(self.chunks)
+        for doc_id, dist in zip(ids, distances):
+            scores[int(doc_id)] = 1.0 - dist
+        return scores
+
+    def search(self, query_embedding: list[float], top_k: int = 3
+               ) -> list[tuple[str, float]]:
+        results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            include=["documents", "distances"],
+        )
+        docs = results["documents"][0]
+        distances = results["distances"][0]
+        return [(doc, 1.0 - dist) for doc, dist in zip(docs, distances)]
+
+    def _state(self) -> dict:
+        return {
+            "persist_dir": self._persist_dir,
+            "collection_name": self._collection_name,
+            "chunk_count": len(self.chunks),
+        }
+
+    @classmethod
+    def _from_state(cls, state: dict, chunks: list[str] | None = None) -> "ChromaRetriever":
+        obj = cls.__new__(cls)
+        obj._persist_dir = state["persist_dir"]
+        obj._collection_name = state["collection_name"]
+        obj.chunks = chunks or []
+        import chromadb
+        obj._client = chromadb.PersistentClient(path=obj._persist_dir)
+        obj._collection = obj._client.get_collection(obj._collection_name)
+        return obj
+
+
 # ── RAG Engine ────────────────────────────────────────────────────
 
 class SimpleRAG:
@@ -223,7 +309,8 @@ class SimpleRAG:
                  embedding_model: str | None = None,
                  embedding_api_key: str | None = None,
                  embedding_base_url: str | None = None,
-                 dense_weight: float = 0.5):
+                 dense_weight: float = 0.5,
+                 chroma_db: str | None = None):
         key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         self._client = OpenAI(api_key=key, base_url=self.DEEPSEEK_BASE)
         self._verbose = verbose
@@ -245,8 +332,17 @@ class SimpleRAG:
         self._embeddings: list[list[float]] = []
         self._embedding_model_used: str = ""
         self._dense_retriever: DenseRetriever | None = None
+        self._chroma_retriever: ChromaRetriever | None = None
+        self._chroma_db: str | None = chroma_db
         self._embedding_client: OpenAI | None = None
         self._local_embedding_model: object | None = None  # lazily loaded SentenceTransformer
+
+    # ── Logging ──────────────────────────────────────────────────
+
+    def _log(self, msg: str):
+        if self._verbose:
+            ts = time.strftime("%H:%M:%S")
+            print(f"[{ts}] {msg}")
 
     # ── Build ────────────────────────────────────────────────────
 
@@ -292,8 +388,8 @@ class SimpleRAG:
             if "|" in line:
                 slang, formal = line.split("|", 1)
                 self._glossary[slang.strip()] = formal.strip()
-        if self._verbose and self._glossary:
-            print(f"[Glossary] Loaded {len(self._glossary)} mappings")
+        if self._glossary:
+            self._log(f"[Glossary] Loaded {len(self._glossary)} mappings")
 
     def _rewrite_query(self, question: str) -> str:
         """Replace slang terms in the question with formal equivalents."""
@@ -301,10 +397,9 @@ class SimpleRAG:
         for slang, formal in self._glossary.items():
             if slang in result:
                 result = result.replace(slang, formal)
-                if self._verbose:
-                    print(f"[Rewrite] '{slang}' → '{formal}'")
-        if self._verbose and result != question:
-            print(f"[Rewrite] 最终: {question!r} → {result!r}")
+                self._log(f"[Rewrite] '{slang}' → '{formal}'")
+        if result != question:
+            self._log(f"[Rewrite] 最终: {question!r} → {result!r}")
         return result
 
     # ── Dense embeddings ─────────────────────────────────────────
@@ -323,17 +418,14 @@ class SimpleRAG:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
-            if self._verbose:
-                print("[Embed] sentence-transformers not installed, cannot use local model")
+            self._log("[Embed] sentence-transformers not installed, cannot use local model")
             return None
         try:
-            if self._verbose:
-                print(f"[Embed] Loading local model: {self._embedding_model}")
+            self._log(f"[Embed] Loading local model: {self._embedding_model}")
             self._local_embedding_model = SentenceTransformer(self._embedding_model)
             return self._local_embedding_model
         except Exception as e:
-            if self._verbose:
-                print(f"[Embed] Failed to load local model: {e}")
+            self._log(f"[Embed] Failed to load local model: {e}")
             return None
 
     def _is_deepseek_model(self) -> bool:
@@ -358,8 +450,7 @@ class SimpleRAG:
             )
             return resp.data[0].embedding
         except Exception as e:
-            if self._verbose:
-                print(f"[Embed] API query embedding failed: {e}")
+            self._log(f"[Embed] API query embedding failed: {e}")
             return None
 
     def _embed_query_local(self, query: str) -> list[float] | None:
@@ -370,8 +461,7 @@ class SimpleRAG:
             emb = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
             return emb[0].tolist() if hasattr(emb, "tolist") else list(emb[0])
         except Exception as e:
-            if self._verbose:
-                print(f"[Embed] Local query embedding failed: {e}")
+            self._log(f"[Embed] Local query embedding failed: {e}")
             return None
 
     def _embed_chunks(self, chunks: list[str],
@@ -386,9 +476,7 @@ class SimpleRAG:
                 input=batch,
             )
             all_embeddings.extend([d.embedding for d in resp.data])
-            if self._verbose:
-                done = min(i + batch_size, len(chunks))
-                print(f"[Embed] {done}/{len(chunks)} chunks embedded")
+            self._log(f"[Embed] {min(i + batch_size, len(chunks))}/{len(chunks)} chunks embedded")
         return all_embeddings
 
     @staticmethod
@@ -451,14 +539,12 @@ class SimpleRAG:
                 table_fp = Path(fp_str)
                 break
         if not table_fp or not table_fp.is_file():
-            if self._verbose:
-                print("[Nickname table] 武器俗称及来源.md not found in loaded files, skip")
+            self._log("[Nickname table] 武器俗称及来源.md not found in loaded files, skip")
             return 0
 
         table_data = self._parse_nickname_table(table_fp.read_text(encoding="utf-8"))
         if not table_data:
-            if self._verbose:
-                print("[Nickname table] Table parsed but no data extracted")
+            self._log("[Nickname table] Table parsed but no data extracted")
             return 0
 
         title_to_fname = {title: fname for fname, title in self._titles.items()}
@@ -467,20 +553,18 @@ class SimpleRAG:
         for official, nicks in table_data.items():
             fname = title_to_fname.get(official)
             if not fname:
-                if self._verbose:
-                    print(f"[Nickname table] SKIP '{official}': no matching file title in {sorted(self._titles.values())[:5]}...")
+                self._log(f"[Nickname table] SKIP '{official}': no matching file title in {sorted(self._titles.values())[:5]}...")
                 skipped += 1
                 continue
             existing = set(self._nicknames.get(fname, []))
             new = [n for n in nicks if n not in existing]
             if new:
                 self._nicknames[fname] = list(existing | set(nicks))
-                if self._verbose:
-                    print(f"[Nickname table] '{fname}' +{new} (was {list(existing)})")
+                self._log(f"[Nickname table] '{fname}' +{new} (was {list(existing)})")
                 merged += len(new)
         if self._verbose:
-            print(f"[Nickname table] Merged {merged} new nicknames,"
-                  f" {skipped} table rows unmatched, {len(table_data)} total rows")
+            self._log(f"[Nickname table] Merged {merged} new nicknames,"
+                      f" {skipped} table rows unmatched, {len(table_data)} total rows")
         else:
             print(f"[Nickname table] Merged {merged} new nicknames"
                   f" ({skipped} rows unmatched, {len(table_data)} total)")
@@ -572,8 +656,7 @@ class SimpleRAG:
         self._retriever = TfidfRetriever(self._chunks)
         self._merge_table_nicknames()
 
-        if self._verbose:
-            print(f"[Incremental] +{len(added)} ~{len(modified)} -{len(deleted)} files, "
+        self._log(f"[Incremental] +{len(added)} ~{len(modified)} -{len(deleted)} files, "
                   f"{len(self._chunks)} chunks total")
         return True
 
@@ -594,20 +677,24 @@ class SimpleRAG:
             "retriever": self._retriever._state(),
             "embeddings": self._embeddings,
             "embedding_model_used": self._embedding_model_used,
+            "chroma_db": self._chroma_db,
         }
         with open(path, "wb") as f:
             pickle.dump(data, f)
-        if self._verbose:
-            emb_info = f", {len(self._embeddings)} dense vectors" if self._embeddings else ", NO dense embeddings"
-            print(f"[Cache] Saved {len(self._chunks)} chunks{emb_info} → {path}")
+        if self._chroma_db:
+            emb_info = f", chromadb://{self._chroma_db}"
+        elif self._embeddings:
+            emb_info = f", {len(self._embeddings)} dense vectors"
+        else:
+            emb_info = ", NO dense embeddings"
+        self._log(f"[Cache] Saved {len(self._chunks)} chunks{emb_info} → {path}")
 
     def load_cache(self, path: str = "index.pkl", force: bool = False) -> bool:
         """Load cached chunks and retriever. Returns True if cache was loaded.
         With force=False (default), returns False if any source file changed.
         With force=True, loads anyway so incremental_update can fix stale entries."""
         if not Path(path).exists():
-            if self._verbose:
-                print(f"[Cache] No cache file at {path}")
+            self._log(f"[Cache] No cache file at {path}")
             return False
 
         with open(path, "rb") as f:
@@ -619,8 +706,7 @@ class SimpleRAG:
             if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
                 stale.append(fpath)
         if stale and not force:
-            if self._verbose:
-                print(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
+            self._log(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
             return False
 
         self._chunks = data["chunks"]
@@ -632,23 +718,48 @@ class SimpleRAG:
         self._glossary = data.get("glossary", {})
         self._retriever = TfidfRetriever._from_state(data["retriever"])
 
-        # Load dense embeddings if present (backward compatible)
+        # Load dense embeddings (backward compatible)
         self._embeddings = data.get("embeddings", [])
         self._embedding_model_used = data.get("embedding_model_used", "")
-        if self._embeddings:
+        self._chroma_db = data.get("chroma_db")
+
+        # ChromaDB takes priority over in-memory DenseRetriever
+        if self._chroma_db:
+            try:
+                self._chroma_retriever = ChromaRetriever._from_state(
+                    {"persist_dir": self._chroma_db,
+                     "collection_name": "weapons",
+                     "chunk_count": len(self._chunks)},
+                    chunks=self._chunks)
+                if not self._embedding_model:
+                    self._embedding_model = self._embedding_model_used
+                self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
+                          f" ChromaDB ({self._chroma_db})"
+                          f" ({self._embedding_model_used}) from {path}")
+            except Exception as e:
+                self._log(f"[Cache] ChromaDB connect failed: {e},"
+                          f" falling back to in-memory")
+                self._chroma_db = None
+        elif self._embeddings:
             self._dense_retriever = DenseRetriever(self._chunks, self._embeddings)
-            # If no embedding model is configured, use the one from cache
             if not self._embedding_model:
                 self._embedding_model = self._embedding_model_used
 
-        if self._verbose:
+        if not self._chroma_db:
             if self._embeddings:
-                print(f"[Cache] Loaded {len(self._chunks)} chunks,"
-                      f" {len(self._embeddings)} dense vectors"
-                      f" ({self._embedding_model_used}) from {path}")
+                self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
+                          f" {len(self._embeddings)} dense vectors"
+                          f" ({self._embedding_model_used}) from {path}")
             else:
-                print(f"[Cache] Loaded {len(self._chunks)} chunks,"
-                      f" NO dense embeddings from {path}")
+                self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
+                          f" NO dense embeddings from {path}")
+
+        # Eagerly preload local embedding model so first query doesn't pay the cost
+        if (self._chroma_retriever or self._dense_retriever) and self._embedding_model \
+                and not self._is_deepseek_model():
+            self._log(f"Preloading embedding model: {self._embedding_model}")
+            self._load_local_embedding_model()
+
         return True
 
     def is_fresh(self, cache_path: str = "index.pkl") -> bool:
@@ -670,14 +781,12 @@ class SimpleRAG:
         matches: set[str] = set()
         for fname, title in self._titles.items():
             if title and title in question:
-                if self._verbose:
-                    print(f"[Title match] title '{title}' in question → {fname}")
+                self._log(f"[Title match] title '{title}' in question → {fname}")
                 matches.add(fname)
         for fname, nicks in self._nicknames.items():
             for nick in nicks:
                 if nick in question:
-                    if self._verbose:
-                        print(f"[Title match] nickname '{nick}' in question → {fname}")
+                    self._log(f"[Title match] nickname '{nick}' in question → {fname}")
                     matches.add(fname)
                     break
         return matches if matches else None
@@ -699,38 +808,44 @@ class SimpleRAG:
                 if relevant is None:
                     relevant = set()
                 relevant.add(ref)
-                if self._verbose:
-                    print(f"[Title match] also including reference file: {ref}")
+                self._log(f"[Title match] also including reference file: {ref}")
 
-        if self._verbose:
-            if relevant:
-                print(f"[Title match] -> {relevant}")
-            else:
-                print(f"[Title match] no match, searching all files")
+        if relevant:
+            self._log(f"[Title match] -> {relevant}")
+        else:
+            self._log(f"[Title match] no match, searching all files")
 
-        # Get dense embedding scores (if DenseRetriever is available)
+        # Get dense embedding scores: ChromaDB > DenseRetriever > TF-IDF only
         dense_scores = None
-        if self._dense_retriever and self._embedding_model:
+        dense_source = None  # "chroma" or "memory"
+        if self._chroma_retriever and self._embedding_model:
+            query_emb = self._embed_query(search_query)
+            if query_emb is not None:
+                dense_scores = self._chroma_retriever.score_all(query_emb)
+                dense_source = "chroma"
+        elif self._dense_retriever and self._embedding_model:
             query_emb = self._embed_query(search_query)
             if query_emb is not None:
                 dense_scores = self._dense_retriever.score_all(query_emb)
-                if self._verbose:
-                    print(f"[Dense] using dense scores, model={self._embedding_model}")
-                    # Show top-N dense-only hits so user can see what vector search matched
-                    dense_top = sorted(enumerate(dense_scores), key=lambda x: x[1], reverse=True)
-                    print(f"[Dense] top-5 dense-only hits:")
-                    for rank, (idx, score) in enumerate(dense_top[:5]):
-                        src = self._sources[idx] if idx < len(self._sources) else "?"
-                        snippet = self._chunks[idx][:80].replace("\n", " ") if idx < len(self._chunks) else "?"
-                        print(f"[Dense]   [{rank}] score={score:.4f}  file={src}")
-                        print(f"[Dense]        text: {snippet}...")
-            elif self._verbose:
-                print(f"[Dense] query embedding failed, falling back to TF-IDF only")
-        elif self._verbose:
-            if self._dense_retriever is None:
-                print(f"[Dense] no DenseRetriever loaded, using TF-IDF only")
+                dense_source = "memory"
+
+        if dense_scores is not None:
+            tag = f"[Dense/{dense_source}]"
+            self._log(f"{tag} using dense scores, model={self._embedding_model}")
+            dense_top = sorted(enumerate(dense_scores), key=lambda x: x[1], reverse=True)
+            self._log(f"{tag} top-5 hits:")
+            for rank, (idx, score) in enumerate(dense_top[:5]):
+                src = self._sources[idx] if idx < len(self._sources) else "?"
+                snippet = self._chunks[idx][:80].replace("\n", " ") if idx < len(self._chunks) else "?"
+                self._log(f"{tag}   [{rank}] score={score:.4f}  file={src}")
+                self._log(f"{tag}        text: {snippet}...")
+        else:
+            if self._chroma_retriever is None and self._dense_retriever is None:
+                self._log(f"[Dense] no retriever loaded, using TF-IDF only")
+            elif not self._embedding_model:
+                self._log(f"[Dense] no embedding model configured, using TF-IDF only")
             else:
-                print(f"[Dense] no embedding model configured, using TF-IDF only")
+                self._log(f"[Dense] query embedding failed, falling back to TF-IDF only")
 
         results = self._retriever.search_diverse(
             search_query, self._sources, top_k=top_k, per_file=2,
@@ -770,8 +885,7 @@ class SimpleRAG:
             except APIConnectionError:
                 if attempt < 2:
                     wait = (attempt + 1) * 2
-                    if self._verbose:
-                        print(f"[Retry] Connection error, waiting {wait}s...")
+                    self._log(f"[Retry] Connection error, waiting {wait}s...")
                     time.sleep(wait)
                 else:
                     raise

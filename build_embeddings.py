@@ -1,38 +1,32 @@
-"""Pre-compute dense embeddings and add them to index.pkl.
+"""Pre-compute dense embeddings for hybrid retrieval.
 
 Run AFTER python build_tfidf.py (which creates the TF-IDF index).
-Supports two modes: local model (default) or API.
+Supports three storage backends: in-memory (pkl), ChromaDB, or API.
 
 Usage:
-  python build_embeddings.py                   # local mode, BAAI/bge-small-zh-v1.5
-  python build_embeddings.py --mode local       # explicit local mode
-  python build_embeddings.py --mode api         # DeepSeek embedding API
-  python build_embeddings.py --model <name>     # override model
-  python build_embeddings.py --force            # overwrite existing embeddings
+  python build_embeddings.py                     # in-memory, BAAI/bge-small-zh-v1.5
+  python build_embeddings.py --chroma             # ChromaDB storage (recommended)
+  python build_embeddings.py --mode api           # DeepSeek API embeddings
+  python build_embeddings.py --model <name>       # override model
+  python build_embeddings.py --force              # overwrite existing embeddings
 
 Examples:
-  # Use a fine-tuned local model
-  python build_embeddings.py --model ./my-finetuned-bge
-
-  # Use DeepSeek API with a specific model
-  python build_embeddings.py --mode api --model deepseek-embedding-lite
-
-Fine-tuning tip:
-  You can fine-tune BAAI/bge-small-zh-v1.5 on domain-specific data (e.g. weapon
-  synonym pairs, question-chunk pairs) using sentence-transformers or FlagEmbedding.
-  Then pass the fine-tuned model path via --model.
+  python build_embeddings.py --chroma                         # ChromaDB + local model
+  python build_embeddings.py --chroma --mode api              # ChromaDB + API
+  python build_embeddings.py --chroma --model ./my-finetuned  # ChromaDB + fine-tuned model
 """
 
 import sys
 from pathlib import Path
 
-from simple_rag import DenseRetriever, SimpleRAG, load_dotenv
+from simple_rag import ChromaRetriever, DenseRetriever, SimpleRAG, load_dotenv
 
 # ── Defaults ─────────────────────────────────────────────────────────
 
-DEFAULT_LOCAL_MODEL = "BAAI/bge-small-zh-v1.5"  # 24M params, 512-dim, Chinese-optimized
+DEFAULT_LOCAL_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_API_MODEL = "deepseek-embedding-lite"
 CACHE_FILE = "index.pkl"
+CHROMA_DIR = "chroma_db"
 
 # ── Main ─────────────────────────────────────────────────────────────
 
@@ -44,6 +38,7 @@ if __name__ == "__main__":
     mode = "local"
     model_override: str | None = None
     force = False
+    use_chroma = False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -56,12 +51,16 @@ if __name__ == "__main__":
         elif args[i] == "--model" and i + 1 < len(args):
             model_override = args[i + 1]
             i += 2
+        elif args[i] == "--chroma":
+            use_chroma = True
+            i += 1
         elif args[i] == "--force":
             force = True
             i += 1
         else:
             print(f"Unknown argument: {args[i]}")
-            print("Usage: python build_embeddings.py [--mode local|api] [--model NAME] [--force]")
+            print("Usage: python build_embeddings.py [--chroma] [--mode local|api]"
+                  " [--model NAME] [--force]")
             sys.exit(1)
 
     # Check prerequisites
@@ -76,10 +75,19 @@ if __name__ == "__main__":
     print(f"Loaded {len(rag._chunks)} chunks from {CACHE_FILE}")
 
     # Check if embeddings already exist
-    if rag._dense_retriever is not None and not force:
-        print(f"Embeddings already exist ({len(rag._embeddings)} vectors,"
-              f" {len(rag._embeddings[0])}-dim).")
-        print("Use --force to overwrite.")
+    existing = False
+    if use_chroma:
+        chroma_path = Path(CHROMA_DIR)
+        if chroma_path.exists() and any(chroma_path.iterdir()):
+            existing = True
+            existing_desc = f"ChromaDB at {CHROMA_DIR}/"
+    else:
+        if rag._dense_retriever is not None:
+            existing = True
+            existing_desc = f"{len(rag._embeddings)} in-memory vectors"
+
+    if existing and not force:
+        print(f"Embeddings already exist ({existing_desc}). Use --force to overwrite.")
         sys.exit(0)
 
     # Resolve model name
@@ -121,12 +129,36 @@ if __name__ == "__main__":
         embeddings_list = rag._embed_chunks(rag._chunks)
 
     # ── Save ─────────────────────────────────────────────────────────
-    rag._embeddings = embeddings_list
     rag._embedding_model_used = model_name
-    rag._dense_retriever = DenseRetriever(rag._chunks, rag._embeddings)
 
-    rag.save_cache(CACHE_FILE)
-    print(f"\n✓ {len(rag._embeddings)} dense vectors ({len(rag._embeddings[0])}-dim)"
-          f" via {model_name}")
-    print(f"  Saved to {CACHE_FILE}")
+    if use_chroma:
+        # Delete old collection if it exists (for --force)
+        if force and Path(CHROMA_DIR).exists():
+            import shutil
+            shutil.rmtree(CHROMA_DIR)
+            print(f"  Removed old ChromaDB at {CHROMA_DIR}/")
+
+        rag._chroma_retriever = ChromaRetriever(
+            chunks=rag._chunks,
+            embeddings=embeddings_list,
+            sources=rag._sources,
+            persist_dir=CHROMA_DIR,
+        )
+        rag._chroma_db = CHROMA_DIR
+        rag._embeddings = []  # don't duplicate in pkl
+        rag._dense_retriever = None
+        rag.save_cache(CACHE_FILE)
+        print(f"\n✓ {len(rag._chunks)} chunks indexed in ChromaDB"
+              f" ({len(embeddings_list[0])}-dim) via {model_name}")
+        print(f"  ChromaDB: {CHROMA_DIR}/  |  index: {CACHE_FILE} (TF-IDF only)")
+    else:
+        rag._embeddings = embeddings_list
+        rag._dense_retriever = DenseRetriever(rag._chunks, rag._embeddings)
+        rag._chroma_db = None
+        rag._chroma_retriever = None
+        rag.save_cache(CACHE_FILE)
+        print(f"\n✓ {len(rag._embeddings)} dense vectors"
+              f" ({len(rag._embeddings[0])}-dim) via {model_name}")
+        print(f"  Saved to {CACHE_FILE}")
+
     print(f"  Run ask.py — you should see 'TF-IDF + Dense' in the banner.")
