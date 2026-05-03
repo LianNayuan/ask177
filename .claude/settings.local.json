@@ -33,7 +33,21 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('database.py', doraise=True\\); py_compile.compile\\('ask.py', doraise=True\\); py_compile.compile\\('simple_rag.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('database.py', doraise=True\\); py_compile.compile\\('simple_rag.py', doraise=True\\); py_compile.compile\\('build_tfidf.py', doraise=True\\); py_compile.compile\\('ask.py', doraise=True\\); py_compile.compile\\('build_embeddings.py', doraise=True\\); py_compile.compile\\('server.py', doraise=True\\); py_compile.compile\\('package.py', doraise=True\\); print\\('All OK'\\)\")",
       "Bash(python -c \"from database import Database; db=Database\\(\\); k=db.load_knowledge\\(\\); print\\(f'chunks={len\\(k[\\\\\"chunks\\\\\"]\\)}, files={len\\(k[\\\\\"file_names\\\\\"]\\)}, nicknames={len\\(k[\\\\\"nicknames\\\\\"]\\)} files'\\)\")",
-      "Bash(python ask.py -q)"
+      "Bash(python ask.py -q)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); py_compile.compile\\('ask.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python -c \"print\\(open\\('glossary_dump.txt', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(timeout 60 python ask.py)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('server.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python server.py --port 8765)",
+      "Bash(curl -s http://localhost:8765/health)",
+      "Bash(curl -s -X POST http://localhost:8765/ask -H 'Content-Type: application/json' -d '{\"question\": \"开开的大招是什么\"}')",
+      "Bash(curl -s -X POST http://localhost:8765/ask -H 'Content-Type: application/json' -d '{\"question\": \"是4k\", \"session_id\": 1}')",
+      "Bash(curl -s -X POST http://localhost:8765/ask -H \"Content-Type: application/json\" -d \"{\\\\\"question\\\\\": \\\\\"开开的大招是什么\\\\\"}\")",
+      "Bash(curl -s -X POST http://localhost:8765/ask -H \"Content-Type: application/json\" -d \"{\\\\\"question\\\\\": \\\\\"是4k\\\\\", \\\\\"session_id\\\\\": 1}\")",
+      "Bash(curl -s -X POST http://localhost:8765/ask -H \"Content-Type: application/json\" -d \"{\\\\\"question\\\\\": \\\\\"hello\\\\\"}\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill /F /PID 79760)",
+      "Bash(taskkill //F //PID 79760)"
     ]
   }
 }

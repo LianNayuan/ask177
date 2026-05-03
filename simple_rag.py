@@ -26,8 +26,28 @@ class TfidfRetriever:
         self._doc_vecs: list[dict[int, float]] = []
         self._build()
 
+    # CJK Unicode ranges (including extensions, punctuation excluded)
+    _CJK_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]+")
+
     def _tokenize(self, text: str) -> list[str]:
-        return re.findall(r"\w+", text.lower())
+        """Tokenize text: character bigrams for CJK, \\w+ for others."""
+        tokens: list[str] = []
+        pos = 0
+        for m in self._CJK_RE.finditer(text):
+            # Non-CJK part before this CJK span
+            if m.start() > pos:
+                tokens.extend(re.findall(r"\w+", text[pos:m.start()].lower()))
+            # CJK span → character bigrams
+            cjk = m.group()
+            for i in range(len(cjk) - 1):
+                tokens.append(cjk[i:i + 2])
+            # Also add unigrams for single-char matches (names, etc.)
+            tokens.extend(cjk)
+            pos = m.end()
+        # Remaining non-CJK tail
+        if pos < len(text):
+            tokens.extend(re.findall(r"\w+", text[pos:].lower()))
+        return tokens
 
     def _build(self):
         tokenized = [self._tokenize(c) for c in self.chunks]
@@ -851,30 +871,84 @@ class SimpleRAG:
         """Stage 1: find files whose title or nickname appears in the question.
         Returns None if no match (→ search all files)."""
         matches: set[str] = set()
+        q_lower = question.lower()
         for fname, title in self._titles.items():
-            if title and title in question:
+            if title and title.lower() in q_lower:
                 self._log(f"[Title match] title '{title}' in question → {fname}")
                 matches.add(fname)
         for fname, nicks in self._nicknames.items():
             for nick in nicks:
-                if nick in question:
+                if nick.lower() in q_lower:
                     self._log(f"[Title match] nickname '{nick}' in question → {fname}")
                     matches.add(fname)
                     break
         return matches if matches else None
 
-    def ask(self, question: str, top_k: int = 14, debug_chunks: bool = False) -> str:
-        """Ask a question about the loaded documents."""
+    def _rewrite_with_context(self, question: str,
+                               history: list[dict[str, str]] | None) -> str:
+        """Use the LLM to rewrite the question into an optimized search query,
+        resolving pronouns, combining clarifications, and expanding abbreviations
+        based on conversation context.
+
+        Returns the rewritten query, or the original question on failure."""
+        if not history:
+            return question
+
+        recent = history[-10:] if len(history) > 10 else history
+        history_text = "\n".join(
+            f"{'User' if h['role'] == 'user' else 'Assistant'}: {h['content'][:200]}"
+            for h in recent)
+
+        prompt = (
+            "Given this conversation, rewrite the user's LATEST message into a "
+            "self-contained search query for a weapon knowledge base.\n\n"
+            "Rules:\n"
+            "- If the user is clarifying or correcting (e.g. '是4k', '第一个'), "
+            "combine it with the previous question's topic. Example: '是4k' + "
+            "previous '开开的大招是什么' → '4K 特殊武器' or '公升4K 大招'.\n"
+            "- Resolve pronouns (它的/这个/那个) to the actual weapon name.\n"
+            "- Keep the user's original intent even if you add weapon names.\n"
+            "- Output ONLY the rewritten query, nothing else.\n\n"
+            f"Conversation:\n{history_text}\n\n"
+            f"Latest user message: \"{question}\"\n"
+            "Search query:"
+        )
+
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=80,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = resp.choices[0].message.content.strip()
+            # Strip any quotes the model might add
+            result = result.strip('"\'')
+            if result and result != question:
+                self._log(f"[Rewrite] context-aware: {question!r} → {result!r}")
+                return result
+            return question
+        except Exception as e:
+            self._log(f"[Rewrite] context rewrite failed ({e}), using original")
+            return question
+
+    def ask(self, question: str, top_k: int = 14, debug_chunks: bool = False,
+            history: list[dict[str, str]] | None = None) -> str:
+        """Ask a question about the loaded documents.
+        history: prior turns in this conversation (role/content dicts)."""
         if not self._retriever or not self._chunks:
             return "No documents loaded. Call .load() or .load_cache() first."
 
-        # Rewrite slang → formal for better retrieval
-        search_query = self._rewrite_query(question)
+        # ── Stage 1: Query rewriting ──────────────────────────────
+        # Let the LLM resolve pronouns, combine clarifications, and expand
+        # abbreviations using conversation context.
+        search_query = self._rewrite_with_context(question, history)
+        # Then apply glossary rules (lightweight, no API call)
+        search_query = self._rewrite_query(search_query)
 
+        # ── Stage 2: File matching & retrieval ────────────────────
         relevant = self._find_relevant_files(search_query) or self._find_relevant_files(question)
 
-        # Always include reference files so cross-cutting info (nickname origins, etc.)
-        # isn't excluded when a specific weapon is matched
+        # Always include the nickname reference file
         for ref in self._file_names:
             if ref == "武器俗称及来源.md" and (relevant is None or ref not in relevant):
                 if relevant is None:
@@ -887,9 +961,9 @@ class SimpleRAG:
         else:
             self._log(f"[Title match] no match, searching all files")
 
-        # Get dense embedding scores: ChromaDB > DenseRetriever > TF-IDF only
+        # Get dense embedding scores
         dense_scores = None
-        dense_source = None  # "chroma" or "memory"
+        dense_source: str | None = None
         if self._chroma_retriever and self._embedding_model:
             query_emb = self._embed_query(search_query)
             if query_emb is not None:
@@ -913,17 +987,19 @@ class SimpleRAG:
                 self._log(f"{tag}        text: {snippet}...")
         else:
             if self._chroma_retriever is None and self._dense_retriever is None:
-                self._log(f"[Dense] no retriever loaded, using TF-IDF only")
+                self._log("[Dense] no retriever loaded, using TF-IDF only")
             elif not self._embedding_model:
-                self._log(f"[Dense] no embedding model configured, using TF-IDF only")
+                self._log("[Dense] no embedding model configured, using TF-IDF only")
             else:
-                self._log(f"[Dense] query embedding failed, falling back to TF-IDF only")
+                self._log("[Dense] query embedding failed, falling back to TF-IDF only")
 
         results = self._retriever.search_diverse(
             search_query, self._sources, top_k=top_k, per_file=2,
             file_filter=relevant,
             dense_scores=dense_scores,
             dense_weight=self._dense_weight)
+
+        # ── Stage 3: Build context ────────────────────────────────
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
         if debug_chunks:
@@ -937,14 +1013,28 @@ class SimpleRAG:
                 print(f"[DEBUG]   [{i}] score={score:.4f}  file={src}  "
                       f"text={chunk[:80]}...")
 
-        prompt = (
+        context = self._sanitize(context)
+        question_sanitized = self._sanitize(question)
+
+        # ── Stage 4: Build messages & call LLM ────────────────────
+        system_prompt = (
             "You are a helpful assistant. Answer the user's question based ONLY on "
-            "the provided document excerpts. If the documents don't contain enough "
-            "information, say so honestly.\n\n"
-            f"### Documents\n{context}\n\n"
-            f"### Question\n{question}\n\n"
-            "### Answer"
+            "the provided document excerpts.\n"
+            "If the question is vague or the documents lack key details (e.g. the "
+            "user asks 'tell me about X' but doesn't specify which aspect), ask a "
+            "brief clarifying question to narrow down what they want.\n"
+            "If the documents genuinely don't contain the answer even after "
+            "clarification, say so honestly."
         )
+        user_content = (f"### Documents\n{context}\n\n"
+                        f"### Question\n{question_sanitized}")
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        if history:
+            for h in history:
+                messages.append({"role": h["role"],
+                                 "content": self._sanitize(h["content"])})
+        messages.append({"role": "user", "content": user_content})
 
         # Collect query metadata for logging
         result_files = {self._sources[self._chunks.index(c)]
@@ -956,23 +1046,20 @@ class SimpleRAG:
         else:
             ret_mode = "TF-IDF only"
         self._last_query_info = {
-            "question": question,
+            "question": question_sanitized,
             "search_query": search_query,
-            "rewrite": question if question != search_query else "",
+            "rewrite": question_sanitized if question_sanitized != search_query else "",
             "hit_files": ", ".join(sorted(result_files)),
             "mode": ret_mode,
             "dense_source": dense_source,
         }
-
-        # Final sanitize — some .md files may contain lone surrogates
-        prompt = self._sanitize(prompt)
 
         for attempt in range(3):
             try:
                 resp = self._client.chat.completions.create(
                     model=self._model,
                     max_tokens=1024,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                 )
                 answer = resp.choices[0].message.content
                 self._last_query_info["answer"] = answer

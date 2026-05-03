@@ -32,6 +32,14 @@ def _save_glossary_file(glossary: dict[str, str], path: str):
 # ── Q&A ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Windows: force UTF-8 to avoid GBK mojibake
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stdin.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     if not API_KEY:
         print("Missing DEEPSEEK_API_KEY in .env file.")
         sys.exit(1)
@@ -78,10 +86,29 @@ if __name__ == "__main__":
         mode = "TF-IDF only (no dense embeddings)"
         print("  Hint: run 'python build_embeddings.py --chroma' for semantic search.")
 
+    # ── Session management ──────────────────────────────────────────
+    conv_id = db.last_conversation_id()
+    resume_info = ""
+    if conv_id:
+        conv = db.get_conversation(conv_id)
+        if conv:
+            title_preview = (conv["title"] or "(empty)")[:30]
+            resume_info = f" (resumed #{conv_id}: {title_preview})"
+    else:
+        conv_id = db.create_conversation()
+        resume_info = " (new session)"
+
+    def _history_messages(n: int = 10) -> list[dict[str, str]]:
+        rows = db.get_history(conv_id, limit=n)
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
+
+    
     print(f"\n=== RAG Q&A (DeepSeek) ===\n"
           f"{len(rag._file_names)} files, {len(rag._chunks)} chunks\n"
           f"Retrieval: {mode}\n"
-          f"Commands: /add  /list  /del  /history  /stats  /feedback\n")
+          f"Session #{conv_id}{resume_info}\n"
+          f"Commands: /new  /sessions  /switch  /add  /list  /del"
+          f"  /history  /stats  /feedback\n")
 
     while True:
         try:
@@ -95,6 +122,39 @@ if __name__ == "__main__":
             continue
 
         # ── Commands ──────────────────────────────────────────────
+        if q == "/new":
+            conv_id = db.create_conversation()
+            print(f"  New session #{conv_id} started.\n")
+            continue
+
+        if q == "/sessions":
+            rows = db.recent_conversations(10)
+            if not rows:
+                print("  (no sessions)\n")
+            else:
+                for r in rows:
+                    marker = " ← current" if r["id"] == conv_id else ""
+                    title = (r["title"] or "(empty)")[:40]
+                    print(f"  [#{r['id']}] {r['updated_at']}"
+                          f" | {r['msg_count']} msgs | {title}{marker}")
+                print()
+            continue
+
+        if q.startswith("/switch "):
+            target = q[8:].strip()
+            if target.isdigit():
+                target_id = int(target)
+                if db.get_conversation(target_id):
+                    conv_id = target_id
+                    conv = db.get_conversation(conv_id)
+                    print(f"  Switched to session #{conv_id}"
+                          f" ({(conv['title'] or '')[:30]})\n")
+                else:
+                    print(f"  Session #{target_id} not found.\n")
+            else:
+                print("  Usage: /switch <id>\n")
+            continue
+
         if q.startswith("/add "):
             parts = q[5:].split("=", 1)
             if len(parts) == 2:
@@ -164,10 +224,15 @@ if __name__ == "__main__":
 
         # ── Ask ───────────────────────────────────────────────────
         t0 = time.time()
-        answer = rag.ask(q, debug_chunks=debug_chunks)
+        history = _history_messages(10)
+        answer = rag.ask(q, debug_chunks=debug_chunks, history=history)
         elapsed_ms = int((time.time() - t0) * 1000)
 
-        # Log to SQLite (sanitize in case API returned surrogates)
+        # Save to conversation history
+        db.add_message(conv_id, "user", SimpleRAG._sanitize(q))
+        db.add_message(conv_id, "assistant", SimpleRAG._sanitize(answer))
+
+        # Log to query_logs (sanitize in case API returned surrogates)
         info = rag._last_query_info
         db.log_query(
             question=SimpleRAG._sanitize(q),

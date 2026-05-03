@@ -24,6 +24,7 @@
                ▼
 ┌──────────────────────────────────────────┐
 │  SimpleRAG (simple_rag.py)                │
+│  ├─ LLM 上下文查询改写 (多轮对话)          │
 │  ├─ 口语改写 (glossary.md)                │
 │  ├─ 文件名/俗称匹配 → 缩小检索范围        │
 │  ├─ TF-IDF 检索 (TfidfRetriever)          │
@@ -95,10 +96,22 @@ python server.py --port 8000
 ```
 
 ```bash
-# 提问
+# 新会话提问（session_id 为 0 或省略 → 自动创建）
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "斯普拉滚筒的伤害是多少？"}'
+# → {"answer": "...", "session_id": 1}
+
+# 继续同一会话（带上上次返回的 session_id）
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "它的次要武器是什么", "session_id": 1}'
+
+# 手动开启新会话
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "/new"}'
+# → {"answer": "New session #2 started.", "session_id": 2}
 
 # 健康检查
 curl http://localhost:8000/health
@@ -171,6 +184,12 @@ python build_embeddings.py --force                 # 覆盖已有向量
   /add 俗称=正式名   添加俗称映射（如 /add 红牙刷=斯普拉射击枪）
   /list              列出所有映射
   /del 俗称          删除映射
+  /new               开启新会话（清空对话历史）
+  /sessions          列出最近会话
+  /switch <id>       切换到指定会话
+  /history           查看最近问答记录
+  /stats             查看查询统计
+  /feedback <id> <1-5> 对指定回答评分
   exit / quit / q    退出
 ```
 
@@ -190,7 +209,7 @@ python ask.py -q           # 安静模式
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/ask` | POST | 问答，body: `{"question": "..."}` |
+| `/ask` | POST | 问答，body: `{"question": "...", "session_id": 0}` |
 | `/health` | GET | 健康检查 |
 | `/docs` | GET | Swagger 调试页面 |
 
@@ -235,11 +254,59 @@ python crawl.py 1-300                         # 批量爬取
 python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 ```
 
+## 多轮对话
+
+系统支持多轮对话，核心机制是 **LLM 上下文查询改写**：
+
+```
+用户: 开开的大招是什么
+  → LLM 检索不到"开开"，反问"开开是什么武器？"
+用户: 是4k
+  → LLM 根据对话历史，将"是4k"改写为"4K 特殊武器"
+  → 检索命中公升4K.md → 回答：弹跳声呐
+用户: 它的副武器呢
+  → LLM 将"它的"改写为"公升4K"
+  → 检索命中 → 回答：墨汁陷阱
+```
+
+### 设计原则
+
+- **后端只做确定性工作**：TF-IDF/向量检索、文件名匹配、glossary 替换
+- **语义理解全交给 LLM**：代词消解、澄清合并、意图判断
+- 不使用手写规则判断"这是新问题还是追问"——LLM 自己决定怎么改写查询
+
+### CLI 多轮
+
+`python ask.py` 启动后自动从 SQLite 恢复上次会话，所有对话自动保存。对话历史（最近 10 轮）传给 LLM 做上下文。
+
+| 命令 | 功能 |
+|------|------|
+| `/new` | 开始新会话 |
+| `/sessions` | 列出最近 10 个会话 |
+| `/switch <id>` | 切换到指定会话 |
+
+### API 多轮
+
+客户端负责传递 `session_id`：
+
+```json
+// 第一轮：不带 session_id 或设为 0
+{"question": "斯普拉滚筒的伤害是多少？"}
+// 响应 → {"answer": "...", "session_id": 5}
+
+// 第二轮：带上 session_id 继续对话
+{"question": "它的副武器是什么", "session_id": 5}
+
+// 开启新会话
+{"question": "/new"}
+```
+
 ## 项目文件
 
 | 文件 | 说明 |
 |------|------|
-| `simple_rag.py` | RAG 核心引擎：TF-IDF + 稠密向量检索 + DeepSeek 问答 |
+| `simple_rag.py` | RAG 核心引擎：LLM 查询改写 + TF-IDF + 稠密向量检索 + DeepSeek 问答 |
+| `database.py` | SQLite 数据库：问答日志 + 俗称映射 + 会话历史 + 知识元数据 |
 | `build_tfidf.py` | TF-IDF 关键词索引构建（支持增量更新） |
 | `build_embeddings.py` | 稠密向量索引构建（本地模型 / API） |
 | `ask.py` | 命令行问答界面 |
@@ -253,10 +320,11 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 ## 当前的 todo
 
 - [ ] 知识库内容还需要校对（部分武器数据可能有误）
-- [ ] 补充所有武器的配置文件（目前 167 把，仍需补充）
-- [ ] 支持多轮对话（目前是单轮问答）
+- [ ] 补充所有武器的配置文件（目前 173 把，仍需补充）
+- [x] 支持多轮对话（LLM 上下文查询改写 + SQLite 会话管理）
 - [ ] 支持动态维护 glossary（在多轮对话中自动学习俗称映射）
 - [x] 引入向量检索（TF-IDF + 稠密向量混合检索，支持本地模型微调）
+- [x] 引入 SQLite 数据库（问答日志 + 俗称映射 + 会话历史 + 知识元数据）
 - [ ] 参考 [小鱿鱿](https://github.com/Cypas/splatoon3-schedule) 的翻译数据，丰富知识来源
 
 ## License

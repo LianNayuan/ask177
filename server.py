@@ -31,6 +31,7 @@ CACHE_FILE = str(APP_DIR / "index.pkl")
 
 app = None  # set by main()
 rag: SimpleRAG | None = None
+db: Database | None = None
 
 
 def create_app():
@@ -41,9 +42,11 @@ def create_app():
 
     class QuestionRequest(BaseModel):
         question: str
+        session_id: int = 0  # 0 = new session, >0 = continue existing
 
     class AnswerResponse(BaseModel):
         answer: str
+        session_id: int
 
     @app.get("/health")
     def health():
@@ -53,9 +56,31 @@ def create_app():
     def ask(req: QuestionRequest):
         if not req.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
-        answer = rag.ask(req.question)
+
+        # Session management
+        sid = req.session_id
+        if sid and db.get_conversation(sid):
+            # Continuing an existing session
+            pass
+        elif req.question.strip() == "/new":
+            # Explicit new session request
+            sid = db.create_conversation()
+            return AnswerResponse(answer=f"New session #{sid} started.", session_id=sid)
+        else:
+            # First message or invalid session_id → create new
+            sid = db.create_conversation()
+
+        # Load history and ask
+        rows = db.get_history(sid, limit=10)
+        history = [{"role": r["role"], "content": r["content"]} for r in rows]
+        answer = rag.ask(req.question, history=history)
         answer = SimpleRAG._sanitize(answer)
-        return AnswerResponse(answer=answer)
+
+        # Persist
+        db.add_message(sid, "user", SimpleRAG._sanitize(req.question))
+        db.add_message(sid, "assistant", answer)
+
+        return AnswerResponse(answer=answer, session_id=sid)
 
     return app
 

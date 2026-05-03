@@ -10,7 +10,7 @@ DB_PATH = "data.db"
 class Database:
     def __init__(self, path: str = DB_PATH):
         self._path = path
-        self._conn = sqlite3.connect(path)
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_tables()
@@ -64,6 +64,22 @@ class Database:
             CREATE TABLE IF NOT EXISTS knowledge_meta (
                 key         TEXT PRIMARY KEY,
                 value       TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS conversations (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                role            TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                content         TEXT NOT NULL,
+                hit_files       TEXT,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         self._conn.commit()
@@ -257,6 +273,63 @@ class Database:
         row = self._conn.execute(
             "SELECT COUNT(*) as n FROM knowledge_files").fetchone()
         return row["n"] > 0
+
+    # ── Conversations ──────────────────────────────────────────────
+
+    def create_conversation(self, title: str = "") -> int:
+        """Create a new conversation. Returns its id."""
+        cur = self._conn.execute(
+            "INSERT INTO conversations (title) VALUES (?)", (title,))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def add_message(self, conversation_id: int, role: str, content: str,
+                    hit_files: str = "") -> int:
+        """Add a message to a conversation. Updates conversations.updated_at."""
+        cur = self._conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, hit_files)"
+            " VALUES (?, ?, ?, ?)",
+            (conversation_id, role, content, hit_files))
+        self._conn.execute(
+            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP"
+            " WHERE id = ?", (conversation_id,))
+        # Auto-set title from first user message
+        self._conn.execute(
+            "UPDATE conversations SET title = ?"
+            " WHERE id = ? AND title = ''",
+            (content[:40], conversation_id))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_history(self, conversation_id: int, limit: int = 10
+                    ) -> list[sqlite3.Row]:
+        """Get recent messages from a conversation (newest last)."""
+        return self._conn.execute(
+            "SELECT role, content FROM messages"
+            " WHERE conversation_id = ?"
+            " ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit)).fetchall()[::-1]
+
+    def recent_conversations(self, limit: int = 10) -> list[sqlite3.Row]:
+        """List recent conversations."""
+        return self._conn.execute(
+            "SELECT c.id, c.title, c.created_at, c.updated_at,"
+            " (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as msg_count"
+            " FROM conversations c ORDER BY c.updated_at DESC LIMIT ?",
+            (limit,)).fetchall()
+
+    def get_conversation(self, conversation_id: int) -> sqlite3.Row | None:
+        """Get a conversation by id."""
+        return self._conn.execute(
+            "SELECT * FROM conversations WHERE id = ?",
+            (conversation_id,)).fetchone()
+
+    def last_conversation_id(self) -> int | None:
+        """Get the id of the most recently updated conversation."""
+        row = self._conn.execute(
+            "SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        return row["id"] if row else None
 
     def close(self):
         self._conn.close()
