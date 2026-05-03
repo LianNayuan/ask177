@@ -11,6 +11,7 @@ For dense embeddings, run python build_embeddings.py separately.
 import sys
 from pathlib import Path
 
+from database import Database
 from simple_rag import SimpleRAG, load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -40,11 +41,21 @@ if __name__ == "__main__":
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
 
+    # Init database
+    db = Database()
+    stats = db.stats()
+
+    # Import glossary from file on first run
+    if stats["glossary_entries"] == 0:
+        n = db.import_glossary_from_file(GLOSSARY_FILE)
+        if n > 0:
+            print(f"[DB] Imported {n} glossary entries from {GLOSSARY_FILE}")
+
     rag = SimpleRAG(api_key=API_KEY, verbose=True)
 
     # ── Incremental update (cache exists) ──────────────────────────
-    if Path(CACHE_FILE).exists():
-        rag.load_cache(CACHE_FILE, force=True)
+    if Path(CACHE_FILE).exists() or db.has_knowledge():
+        rag.load_cache(CACHE_FILE, force=True, db=db)
 
         # Mark forced files as "modified" so incremental_update reprocesses them
         for fname in force_files:
@@ -60,24 +71,25 @@ if __name__ == "__main__":
             for fp in matched:
                 rag._file_mtimes[fp] = 0  # force reprocess
 
-        # Reload glossary if it changed since the cache was built
+        # Reload glossary from file if it changed since last build
         glossary_reloaded = False
         glossary_path = Path(GLOSSARY_FILE)
-        cache_mtime = Path(CACHE_FILE).stat().st_mtime
-        if glossary_path.exists() and glossary_path.stat().st_mtime > cache_mtime + 0.1:
-            rag._glossary = {}
-            rag.load_glossary(GLOSSARY_FILE)
-            glossary_reloaded = True
+        if glossary_path.exists():
+            cache_mtime = Path(CACHE_FILE).stat().st_mtime if Path(CACHE_FILE).exists() else 0
+            if glossary_path.stat().st_mtime > cache_mtime + 0.1:
+                rag._glossary = {}
+                rag.load_glossary(GLOSSARY_FILE)
+                glossary_reloaded = True
 
         updated = rag.incremental_update(*MD_DIRS)
 
         if not updated and not glossary_reloaded:
-            print(f"Cache is up-to-date ({CACHE_FILE}). Nothing to build.")
+            print(f"Cache is up-to-date ({CACHE_FILE} + data.db). Nothing to build.")
             print("Use --file <name> to force re-process a specific file,"
                   " or delete index.pkl for a full rebuild.")
             sys.exit(0)
 
-        rag.save_cache(CACHE_FILE)
+        rag.save_cache(CACHE_FILE, db=db)
         print("Done (incremental). Run ask.py to start Q&A.")
         sys.exit(0)
 
@@ -88,8 +100,11 @@ if __name__ == "__main__":
     print(f"Building index from {MD_DIRS} ...")
     rag.load(*MD_DIRS)
     rag.load_glossary(GLOSSARY_FILE)
+    # Import glossary to DB
+    if stats["glossary_entries"] == 0:
+        db.import_glossary_from_file(GLOSSARY_FILE)
     print(f"  {len(rag._file_names)} files → {len(rag._chunks)} chunks"
           f"  glossary: {len(rag._glossary)} entries")
 
-    rag.save_cache(CACHE_FILE)
+    rag.save_cache(CACHE_FILE, db=db)
     print("Done. Run ask.py to start Q&A.")

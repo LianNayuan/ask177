@@ -19,6 +19,7 @@ Examples:
 import sys
 from pathlib import Path
 
+from database import Database
 from simple_rag import ChromaRetriever, DenseRetriever, SimpleRAG, load_dotenv
 
 # ── Defaults ─────────────────────────────────────────────────────────
@@ -69,8 +70,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Load existing index
+    db = Database()
     rag = SimpleRAG(api_key=api_key, verbose=True)
-    rag.load_cache(CACHE_FILE, force=True)
+    rag.load_cache(CACHE_FILE, force=True, db=db)
 
     print(f"Loaded {len(rag._chunks)} chunks from {CACHE_FILE}")
 
@@ -147,7 +149,7 @@ if __name__ == "__main__":
         rag._chroma_db = CHROMA_DIR
         rag._embeddings = []  # don't duplicate in pkl
         rag._dense_retriever = None
-        rag.save_cache(CACHE_FILE)
+        rag.save_cache(CACHE_FILE, db=db)
         print(f"\n✓ {len(rag._chunks)} chunks indexed in ChromaDB"
               f" ({len(embeddings_list[0])}-dim) via {model_name}")
         print(f"  ChromaDB: {CHROMA_DIR}/  |  index: {CACHE_FILE} (TF-IDF only)")
@@ -156,7 +158,7 @@ if __name__ == "__main__":
         rag._dense_retriever = DenseRetriever(rag._chunks, rag._embeddings)
         rag._chroma_db = None
         rag._chroma_retriever = None
-        rag.save_cache(CACHE_FILE)
+        rag.save_cache(CACHE_FILE, db=db)
         print(f"\n✓ {len(rag._embeddings)} dense vectors"
               f" ({len(rag._embeddings[0])}-dim) via {model_name}")
         print(f"  Saved to {CACHE_FILE}")

@@ -336,6 +336,7 @@ class SimpleRAG:
         self._chroma_db: str | None = chroma_db
         self._embedding_client: OpenAI | None = None
         self._local_embedding_model: object | None = None  # lazily loaded SentenceTransformer
+        self._last_query_info: dict = {}  # metadata about the most recent query
 
     # ── Logging ──────────────────────────────────────────────────
 
@@ -360,7 +361,7 @@ class SimpleRAG:
 
         for fp in files:
             self._file_mtimes[str(fp)] = fp.stat().st_mtime
-            text = fp.read_text(encoding="utf-8")
+            text = self._sanitize(fp.read_text(encoding="utf-8", errors="replace"))
             self._file_names.append(fp.name)
             title = self._extract_title(text) or fp.stem
             self._titles[fp.name] = title
@@ -480,6 +481,11 @@ class SimpleRAG:
         return all_embeddings
 
     @staticmethod
+    def _sanitize(text: str) -> str:
+        """Remove lone surrogates that break JSON encoding."""
+        return ''.join(c for c in text if not ('\ud800' <= c <= '\udfff'))
+
+    @staticmethod
     def _extract_title(text: str) -> str | None:
         """Extract the first # heading, trimmed to the part before ' - '."""
         m = re.search(r"^#\s+(.+)", text, re.MULTILINE)
@@ -542,7 +548,8 @@ class SimpleRAG:
             self._log("[Nickname table] 武器俗称及来源.md not found in loaded files, skip")
             return 0
 
-        table_data = self._parse_nickname_table(table_fp.read_text(encoding="utf-8"))
+        table_data = self._parse_nickname_table(
+            self._sanitize(table_fp.read_text(encoding="utf-8", errors="replace")))
         if not table_data:
             self._log("[Nickname table] Table parsed but no data extracted")
             return 0
@@ -637,7 +644,7 @@ class SimpleRAG:
         for fp_str in sorted(added | modified):
             fp = current[fp_str]
             self._file_mtimes[fp_str] = fp.stat().st_mtime
-            text = fp.read_text(encoding="utf-8")
+            text = self._sanitize(fp.read_text(encoding="utf-8", errors="replace"))
             if fp.name not in self._file_names:
                 self._file_names.append(fp.name)
             title = self._extract_title(text) or fp.stem
@@ -662,68 +669,124 @@ class SimpleRAG:
 
     # ── Cache ────────────────────────────────────────────────────
 
-    def save_cache(self, path: str = "index.pkl"):
-        """Save chunks and retriever state to a pickle file."""
+    def save_cache(self, path: str = "index.pkl", db=None):
+        """Save chunks and retriever state.
+
+        If db is provided, structured data (chunks, sources, file metadata,
+        titles, nicknames) goes to SQLite; pickle only holds retriever state
+        and dense config.  Without db, everything goes into pickle (legacy)."""
         if not self._retriever:
             raise RuntimeError("No index built. Call .load() first.")
-        data = {
-            "chunks": self._chunks,
-            "sources": self._sources,
-            "file_names": self._file_names,
-            "file_mtimes": self._file_mtimes,
-            "titles": self._titles,
-            "nicknames": self._nicknames,
-            "glossary": self._glossary,
-            "retriever": self._retriever._state(),
-            "embeddings": self._embeddings,
-            "embedding_model_used": self._embedding_model_used,
-            "chroma_db": self._chroma_db,
-        }
+
+        if db:
+            meta = {}
+            if self._embedding_model_used:
+                meta["embedding_model_used"] = self._embedding_model_used
+            if self._chroma_db:
+                meta["chroma_db"] = self._chroma_db
+            db.save_knowledge(
+                self._file_names, self._file_mtimes, self._titles,
+                self._chunks, self._sources, self._nicknames,
+                meta=meta if meta else None)
+            data = {
+                "retriever": self._retriever._state(),
+                "embeddings": self._embeddings,
+            }
+        else:
+            data = {
+                "chunks": self._chunks,
+                "sources": self._sources,
+                "file_names": self._file_names,
+                "file_mtimes": self._file_mtimes,
+                "titles": self._titles,
+                "nicknames": self._nicknames,
+                "glossary": self._glossary,
+                "retriever": self._retriever._state(),
+                "embeddings": self._embeddings,
+                "embedding_model_used": self._embedding_model_used,
+                "chroma_db": self._chroma_db,
+            }
+
         with open(path, "wb") as f:
             pickle.dump(data, f)
+
         if self._chroma_db:
             emb_info = f", chromadb://{self._chroma_db}"
         elif self._embeddings:
             emb_info = f", {len(self._embeddings)} dense vectors"
         else:
             emb_info = ", NO dense embeddings"
-        self._log(f"[Cache] Saved {len(self._chunks)} chunks{emb_info} → {path}")
+        db_info = " + SQLite" if db else ""
+        self._log(f"[Cache] Saved {len(self._chunks)} chunks{emb_info} → {path}{db_info}")
 
-    def load_cache(self, path: str = "index.pkl", force: bool = False) -> bool:
-        """Load cached chunks and retriever. Returns True if cache was loaded.
-        With force=False (default), returns False if any source file changed.
-        With force=True, loads anyway so incremental_update can fix stale entries."""
-        if not Path(path).exists():
-            self._log(f"[Cache] No cache file at {path}")
+    def load_cache(self, path: str = "index.pkl", force: bool = False,
+                   db=None) -> bool:
+        """Load cached index. If db is provided, structured metadata comes from
+        SQLite and only the retriever + dense config are read from pickle.
+        Without db, everything is read from pickle (legacy / deployment mode)."""
+        pkl_path = Path(path)
+        have_pkl = pkl_path.exists()
+        have_db = db and db.has_knowledge()
+
+        if not have_pkl and not have_db:
+            self._log(f"[Cache] No cache found (no {path}, no knowledge in DB)")
             return False
 
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-
-        # Check freshness: all source files unchanged
-        stale = []
-        for fpath, mtime in data.get("file_mtimes", {}).items():
-            if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
-                stale.append(fpath)
-        if stale and not force:
-            self._log(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
+        # ── Structured data: prefer SQLite, fall back to pickle ─────
+        if have_db:
+            k = db.load_knowledge()
+            self._chunks = k["chunks"]
+            self._sources = k["sources"]
+            self._file_names = k["file_names"]
+            self._file_mtimes = k["file_mtimes"]
+            self._titles = k["titles"]
+            self._nicknames = k["nicknames"]
+            self._embedding_model_used = k.get("meta", {}).get("embedding_model_used", "")
+            self._chroma_db = k.get("meta", {}).get("chroma_db")
+            self._glossary = db.load_glossary()
+        elif have_pkl:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            self._chunks = data["chunks"]
+            self._sources = data["sources"]
+            self._file_names = data["file_names"]
+            self._file_mtimes = data["file_mtimes"]
+            self._titles = data.get("titles", {})
+            self._nicknames = data.get("nicknames", {})
+            self._glossary = data.get("glossary", {})
+        else:
             return False
 
-        self._chunks = data["chunks"]
-        self._sources = data["sources"]
-        self._file_names = data["file_names"]
-        self._file_mtimes = data["file_mtimes"]
-        self._titles = data.get("titles", {})
-        self._nicknames = data.get("nicknames", {})
-        self._glossary = data.get("glossary", {})
-        self._retriever = TfidfRetriever._from_state(data["retriever"])
+        # ── Freshness check ─────────────────────────────────────────
+        if not force:
+            stale = []
+            for fpath, mtime in self._file_mtimes.items():
+                if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
+                    stale.append(fpath)
+            if stale:
+                self._log(f"[Cache] Stale — {len(stale)} file(s) changed: {stale[:3]}...")
+                return False
 
-        # Load dense embeddings (backward compatible)
-        self._embeddings = data.get("embeddings", [])
-        self._embedding_model_used = data.get("embedding_model_used", "")
-        self._chroma_db = data.get("chroma_db")
+        # ── Retriever always from pickle ───────────────────────────
+        if have_pkl:
+            if have_db:
+                with open(path, "rb") as f:
+                    data = pickle.load(f)
+                # Migration: if DB meta doesn't have chroma config yet,
+                # fall back to legacy pickle values
+                if not self._chroma_db:
+                    self._chroma_db = data.get("chroma_db")
+                if not self._embedding_model_used:
+                    self._embedding_model_used = data.get("embedding_model_used", "")
+            self._retriever = TfidfRetriever._from_state(data["retriever"])
+            self._embeddings = data.get("embeddings", [])
+            if not have_db:
+                self._embedding_model_used = data.get("embedding_model_used", "")
+                self._chroma_db = data.get("chroma_db")
+        else:
+            self._retriever = TfidfRetriever(self._chunks)
 
-        # ChromaDB takes priority over in-memory DenseRetriever
+        # ── ChromaDB / Dense ────────────────────────────────────────
         if self._chroma_db:
             try:
                 self._chroma_retriever = ChromaRetriever._from_state(
@@ -735,7 +798,8 @@ class SimpleRAG:
                     self._embedding_model = self._embedding_model_used
                 self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
                           f" ChromaDB ({self._chroma_db})"
-                          f" ({self._embedding_model_used}) from {path}")
+                          f" ({self._embedding_model_used})"
+                          f"{' + SQLite' if have_db else ' from ' + path}")
             except Exception as e:
                 self._log(f"[Cache] ChromaDB connect failed: {e},"
                           f" falling back to in-memory")
@@ -749,12 +813,14 @@ class SimpleRAG:
             if self._embeddings:
                 self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
                           f" {len(self._embeddings)} dense vectors"
-                          f" ({self._embedding_model_used}) from {path}")
+                          f" ({self._embedding_model_used})"
+                          f"{' + SQLite' if have_db else ' from ' + path}")
             else:
                 self._log(f"[Cache] Loaded {len(self._chunks)} chunks,"
-                          f" NO dense embeddings from {path}")
+                          f" NO dense embeddings"
+                          f"{' + SQLite' if have_db else ' from ' + path}")
 
-        # Eagerly preload local embedding model so first query doesn't pay the cost
+        # Eagerly preload local embedding model
         if (self._chroma_retriever or self._dense_retriever) and self._embedding_model \
                 and not self._is_deepseek_model():
             self._log(f"Preloading embedding model: {self._embedding_model}")
@@ -762,8 +828,14 @@ class SimpleRAG:
 
         return True
 
-    def is_fresh(self, cache_path: str = "index.pkl") -> bool:
-        """Check if cache exists and is up-to-date without loading."""
+    def is_fresh(self, cache_path: str = "index.pkl", db=None) -> bool:
+        """Check if cache is up-to-date without fully loading."""
+        if db and db.has_knowledge():
+            k = db.load_knowledge()
+            for fpath, mtime in k.get("file_mtimes", {}).items():
+                if not Path(fpath).exists() or Path(fpath).stat().st_mtime > mtime + 0.1:
+                    return False
+            return Path(cache_path).exists()  # retriever pickle must also exist
         if not Path(cache_path).exists():
             return False
         with open(cache_path, "rb") as f:
@@ -874,6 +946,27 @@ class SimpleRAG:
             "### Answer"
         )
 
+        # Collect query metadata for logging
+        result_files = {self._sources[self._chunks.index(c)]
+                        for c, _ in results if c in self._chunks}
+        if self._chroma_retriever:
+            ret_mode = "TF-IDF + Dense/chroma"
+        elif self._dense_retriever:
+            ret_mode = "TF-IDF + Dense/memory"
+        else:
+            ret_mode = "TF-IDF only"
+        self._last_query_info = {
+            "question": question,
+            "search_query": search_query,
+            "rewrite": question if question != search_query else "",
+            "hit_files": ", ".join(sorted(result_files)),
+            "mode": ret_mode,
+            "dense_source": dense_source,
+        }
+
+        # Final sanitize — some .md files may contain lone surrogates
+        prompt = self._sanitize(prompt)
+
         for attempt in range(3):
             try:
                 resp = self._client.chat.completions.create(
@@ -881,7 +974,9 @@ class SimpleRAG:
                     max_tokens=1024,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                return resp.choices[0].message.content
+                answer = resp.choices[0].message.content
+                self._last_query_info["answer"] = answer
+                return answer
             except APIConnectionError:
                 if attempt < 2:
                     wait = (attempt + 1) * 2

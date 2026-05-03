@@ -20,6 +20,9 @@ def main():
     if not Path("index.pkl").exists():
         print("Error: index.pkl not found. Run 'python build_tfidf.py' first.")
         sys.exit(1)
+    if not Path("data.db").exists():
+        print("Error: data.db not found. Run 'python build_tfidf.py' first.")
+        sys.exit(1)
 
     print("Building standalone executable with PyInstaller...")
     print(f"  Source: server.py")
@@ -44,9 +47,11 @@ def main():
         print("\nPyInstaller failed. Make sure it's installed: pip install pyinstaller")
         sys.exit(1)
 
-    # 3. Copy index.pkl into dist/ so the exe can find it
+    # 3. Copy index.pkl and data.db into dist/
     shutil.copy2("index.pkl", DIST_DIR / "index.pkl")
     print(f"  Copied index.pkl → {DIST_DIR}/index.pkl")
+    shutil.copy2("data.db", DIST_DIR / "data.db")
+    print(f"  Copied data.db → {DIST_DIR}/data.db")
 
     # 4. Done
     print(f"""
@@ -55,7 +60,8 @@ def main():
 
   Deliverables (in {DIST_DIR}/):
     {EXE_NAME}.exe   ← double-click to start
-    index.pkl        ← the knowledge index
+    index.pkl        ← TF-IDF retriever state
+    data.db          ← knowledge metadata + query logs
 
   To deploy on another machine:
     1. Copy the whole {DIST_DIR}/ folder

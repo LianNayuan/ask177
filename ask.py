@@ -7,8 +7,10 @@ Usage:
 """
 
 import sys
+import time
 from pathlib import Path
 
+from database import Database
 from simple_rag import SimpleRAG, load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -19,8 +21,8 @@ CACHE_FILE = "index.pkl"
 GLOSSARY_FILE = "knowledge/glossary.md"
 
 
-def _save_glossary(glossary: dict[str, str], path: str):
-    """Persist glossary to file."""
+def _save_glossary_file(glossary: dict[str, str], path: str):
+    """Sync glossary to file for backward compatibility."""
     lines = ["# 口语化词汇对照表"]
     for slang, formal in glossary.items():
         lines.append(f"{slang} | {formal}")
@@ -46,11 +48,26 @@ if __name__ == "__main__":
             print(f"Unknown argument: {a}")
             sys.exit(1)
 
+    # Init database
+    db = Database()
+    stats = db.stats()
+    print(f"[DB] Connected to data.db ({stats['total_queries']} queries,"
+          f" {stats['glossary_entries']} glossary entries)")
+
+    # Import glossary from file on first run, then use DB as source of truth
+    if stats["glossary_entries"] == 0:
+        n = db.import_glossary_from_file(GLOSSARY_FILE)
+        if n > 0:
+            print(f"[DB] Imported {n} glossary entries from {GLOSSARY_FILE}")
+
     rag = SimpleRAG(api_key=API_KEY, verbose=verbose)
 
-    if not rag.load_cache(CACHE_FILE):
+    if not rag.load_cache(CACHE_FILE, db=db):
         print("No cache found. Run build_tfidf.py first.")
         sys.exit(1)
+
+    # Load glossary from DB into RAG
+    rag._glossary = db.load_glossary()
 
     # Show retrieval mode
     if rag._chroma_retriever is not None:
@@ -64,7 +81,7 @@ if __name__ == "__main__":
     print(f"\n=== RAG Q&A (DeepSeek) ===\n"
           f"{len(rag._file_names)} files, {len(rag._chunks)} chunks\n"
           f"Retrieval: {mode}\n"
-          f"Commands: /add slang=formal  /list  /del slang\n")
+          f"Commands: /add  /list  /del  /history  /stats  /feedback\n")
 
     while True:
         try:
@@ -83,7 +100,8 @@ if __name__ == "__main__":
             if len(parts) == 2:
                 slang, formal = parts[0].strip(), parts[1].strip()
                 rag._glossary[slang] = formal
-                _save_glossary(rag._glossary, GLOSSARY_FILE)
+                db.add_glossary(slang, formal)
+                _save_glossary_file(rag._glossary, GLOSSARY_FILE)
                 print(f"  + {slang} → {formal}\n")
             else:
                 print("  Usage: /add 大招=特殊武器\n")
@@ -102,12 +120,68 @@ if __name__ == "__main__":
             slang = q[5:].strip()
             if slang in rag._glossary:
                 del rag._glossary[slang]
-                _save_glossary(rag._glossary, GLOSSARY_FILE)
+                db.del_glossary(slang)
+                _save_glossary_file(rag._glossary, GLOSSARY_FILE)
                 print(f"  - {slang} removed\n")
             else:
                 print(f"  '{slang}' not found\n")
             continue
 
+        if q == "/history":
+            rows = db.recent_queries(20)
+            if not rows:
+                print("  (no queries yet)\n")
+            else:
+                for r in rows:
+                    q_preview = r["question"][:60]
+                    print(f"  [{r['id']}] {r['created_at']} | {r['mode']} | {r['latency_ms']}ms")
+                    print(f"       {q_preview}...")
+                print()
+            continue
+
+        if q == "/stats":
+            s = db.stats()
+            print(f"  Total queries:    {s['total_queries']}")
+            print(f"  Avg latency:      {s['avg_latency_ms']}ms")
+            print(f"  Glossary entries: {s['glossary_entries']}")
+            print(f"  Retrieval modes:  {s['retrieval_modes']}")
+            print()
+            continue
+
+        if q.startswith("/feedback "):
+            parts = q[10:].split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                qid, rating = int(parts[0]), int(parts[1])
+                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+                if 1 <= rating <= 5:
+                    db.add_feedback(qid, rating, comment)
+                    print(f"  Feedback recorded: query #{qid} → {rating}/5\n")
+                else:
+                    print("  Rating must be 1-5\n")
+            else:
+                print("  Usage: /feedback <query_id> <1-5> [comment]\n")
+            continue
+
         # ── Ask ───────────────────────────────────────────────────
+        t0 = time.time()
         answer = rag.ask(q, debug_chunks=debug_chunks)
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        # Log to SQLite (sanitize in case API returned surrogates)
+        info = rag._last_query_info
+        db.log_query(
+            question=SimpleRAG._sanitize(q),
+            answer=SimpleRAG._sanitize(answer),
+            mode=info.get("mode", ""),
+            hit_files=info.get("hit_files", ""),
+            rewrite=info.get("rewrite", ""),
+            latency_ms=elapsed_ms,
+        )
+
         print(f"\n{answer}\n")
+        if verbose:
+            print(f"  [{elapsed_ms}ms, {info.get('mode', '?')},"
+                  f" hits: {info.get('hit_files', '?')}]")
+            if info.get("rewrite"):
+                print(f"  [rewrite: {info['question']} → {info['rewrite']}]")
+            print()

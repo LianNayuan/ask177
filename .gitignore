@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 todo.md
 
+# Database
+data.db
+
 # ChromaDB
 chroma_db/
 

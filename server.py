@@ -6,7 +6,7 @@ Usage:
   python server.py --host 127.0.0.1       # local only
   python server.py --cache index.pkl      # custom cache path
 
-When packaged with PyInstaller, place index.pkl and .env next to the .exe.
+When packaged with PyInstaller, place index.pkl, data.db, and .env next to the .exe.
 """
 
 import sys
@@ -18,6 +18,7 @@ if getattr(sys, "frozen", False):
 else:
     APP_DIR = Path(__file__).parent
 
+from database import Database
 from simple_rag import SimpleRAG, load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ def create_app():
         if not req.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
         answer = rag.ask(req.question)
+        answer = SimpleRAG._sanitize(answer)
         return AnswerResponse(answer=answer)
 
     return app
@@ -84,12 +86,17 @@ if __name__ == "__main__":
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
 
+    # Init database (for knowledge metadata, glossary, and query logging)
+    db = Database(str(APP_DIR / "data.db"))
+    if db.stats()["glossary_entries"] == 0:
+        db.import_glossary_from_file(str(APP_DIR / "knowledge/glossary.md"))
+
     # Load index (force=True skips freshness check — no source .md files needed)
     rag = SimpleRAG(api_key=API_KEY, verbose=False)
-    if not rag.load_cache(cache_file, force=True):
-        print(f"Error: {cache_file} not found.")
+    if not rag.load_cache(cache_file, force=True, db=db):
+        print(f"Error: {cache_file} not found and no knowledge in data.db.")
         print("Build it locally: python build_tfidf.py")
-        print("Then upload index.pkl to the server.")
+        print("Then upload index.pkl and data.db to the server.")
         sys.exit(1)
 
     print(f"Loaded {len(rag._file_names)} files, {len(rag._chunks)} chunks"
