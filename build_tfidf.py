@@ -18,7 +18,7 @@ from simple_rag import SimpleRAG, load_dotenv
 
 _env = load_dotenv()
 API_KEY = _env.get("DEEPSEEK_API_KEY", "")
-MD_DIRS = ["knowledge/wiki_cn", "knowledge/picture_ocr"]
+MD_DIRS = ["knowledge/wiki_cn", "knowledge/picture_ocr", "knowledge/wiki_en"]
 GLOSSARY_FILE = "knowledge/glossary.md"
 CACHE_FILE = "index.pkl"
 

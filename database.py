@@ -209,7 +209,7 @@ class Database:
             for fname, nicks in nicknames.items():
                 for nick in nicks:
                     self._conn.execute(
-                        "INSERT INTO knowledge_nicknames (filename, nickname)"
+                        "INSERT OR IGNORE INTO knowledge_nicknames (filename, nickname)"
                         " VALUES (?, ?)",
                         (fname, nick))
 

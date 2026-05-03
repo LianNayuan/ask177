@@ -144,7 +144,7 @@ class TfidfRetriever:
         for chunk, score, src in scored:
             if len(result) >= top_k:
                 break
-            if file_counts[src] < per_file:
+            if file_counts[src] < per_file and (chunk, score) not in result:
                 result.append((chunk, score))
                 file_counts[src] += 1
 
@@ -363,7 +363,10 @@ class SimpleRAG:
     def _log(self, msg: str):
         if self._verbose:
             ts = time.strftime("%H:%M:%S")
-            print(f"[{ts}] {msg}")
+            try:
+                print(f"[{ts}] {msg}")
+            except UnicodeEncodeError:
+                print(f"[{ts}] {msg.encode('ascii', errors='replace').decode('ascii')}")
 
     # ── Build ────────────────────────────────────────────────────
 
@@ -512,21 +515,54 @@ class SimpleRAG:
         if not m:
             return None
         title = m.group(1).strip()
-        title = re.sub(r"\s*[-—–]\s*(完整)?武器详情.*$", "", title)
+        if " - " in title:
+            title = re.sub(r"\s*[-—–]\s*(完整)?武器详情.*$", "", title)
         return title
 
     @staticmethod
     def _extract_nicknames(text: str) -> list[str]:
-        """Extract nicknames (俗称) from the markdown, e.g. '俗称：红牙刷'."""
+        """Extract nicknames from the markdown.
+
+        For Chinese files: parses '俗称：红牙刷、蓝牙刷'.
+        For English files: parses '## Names in Other Languages' for
+        Chinese/Japanese names as cross-language lookup keys.
+        """
+        # Try Chinese nickname field first
         m = re.search(r"俗称[：:]\s*(.+)", text)
-        if not m:
+        if m:
+            raw = m.group(1).strip()
+            if raw not in ("—", "—", "-", "无", ""):
+                parts = re.split(r"[、，,，]", raw)
+                return [p.strip() for p in parts if p.strip()]
+
+        # For English files: extract Chinese/Japanese names from
+        # "## Names in Other Languages" section
+        names_section = re.search(
+            r'## Names in Other Languages\s*\n+(.*?)(?=\n## |\Z)',
+            text, re.DOTALL
+        )
+        if not names_section:
             return []
-        raw = m.group(1).strip()
-        if raw in ("—", "—", "-", "无", ""):
-            return []
-        # Split on Chinese/English commas and enumeration markers
-        parts = re.split(r"[、，,，]", raw)
-        return [p.strip() for p in parts if p.strip()]
+
+        nicks: list[str] = []
+        for m in re.finditer(
+            r'-\s*\*\*(Chinese|Japanese|Korean)\b[^:]*\*\*\s*:\s*(.+?)(?:\n|$)',
+            names_section.group(1), re.IGNORECASE
+        ):
+            raw_value = m.group(2).strip()
+            parts = raw_value.split()
+            name_parts: list[str] = []
+            for p in parts:
+                if re.match(r'^[a-zA-Z]', p):
+                    break
+                if p.startswith('('):
+                    break
+                name_parts.append(p)
+            name = ' '.join(name_parts).strip()
+            if name and len(name) >= 2:
+                nicks.append(name)
+
+        return nicks
 
     @staticmethod
     def _parse_nickname_table(text: str) -> dict[str, list[str]]:

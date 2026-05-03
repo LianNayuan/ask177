@@ -3,6 +3,7 @@ index.pkl
 __pycache__/
 *.pyc
 todo.md
+.claude/
 
 # Database
 data.db
@@ -14,3 +15,9 @@ chroma_db/
 dist/
 build/
 *.spec
+
+# Crawled knowledge (users rebuild via setup script)
+knowledge/wiki_cn/
+knowledge/wiki_en/
+knowledge/picture/
+knowledge/picture_ocr/

@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **知识库**：167 把武器的完整资料（伤害、射程、技能等），支持俗称/口语化改写
+- **知识库**：170+ 把武器的完整资料（伤害、射程、技能等），中英双语检索，支持俗称/口语化改写
 - **智能检索**：TF-IDF + 稠密向量混合检索，文件名/俗称匹配，跨文件综合回答
 - **三种使用方式**：命令行问答 / HTTP API / 独立 .exe 文件
 - **增量构建**：修改知识文件后只重处理变化的文件
@@ -46,90 +46,52 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：一键运行（推荐）
 
 ```bash
-pip install -r requirements.txt
+# Windows
+setup.bat
+
+# macOS / Linux
+bash setup.sh
 ```
 
-### 2. 配置 API Key
+脚本自动完成：安装依赖 → 配置 API Key → 爬取中英文数据 → 构建索引。
 
-在项目根目录创建 `.env` 文件：
-
-```
-DEEPSEEK_API_KEY=sk-your-key-here
-```
-
-### 3. 构建索引
+### 方式二：手动分步
 
 ```bash
-python build_tfidf.py                    # 构建 TF-IDF 关键词索引（必须）
-python build_embeddings.py         # 构建稠密向量索引（可选，推荐）
+pip install -r requirements.txt              # 1. 安装依赖
+# 创建 .env，写入 DEEPSEEK_API_KEY=xxx       # 2. 配置 API Key
+python crawl.py 1-300                        # 3. 爬取中文武器数据
+python crawl_en.py                           # 4. 爬取英文武器数据
+python build_tfidf.py                        # 5. 构建 TF-IDF 索引
+python ask.py                                # 6. 开始问答
 ```
 
-生成 `index.pkl`。之后如果你修改了 `knowledge/wiki_cn/` 下的 `.md` 文件，重新运行 `python build_tfidf.py` 即可增量更新（向量不需要每次重建）。
+### 使用方式
 
-`build_embeddings.py` 支持两种模式：
-```bash
-python build_embeddings.py                     # 本地模型（默认，需 pip install sentence-transformers）
-python build_embeddings.py --mode api          # DeepSeek API（无需额外依赖）
-python build_embeddings.py --model ./my-model  # 使用微调后的本地模型
-```
-
-### 4. 使用
-
-**方式一：命令行问答**
+**命令行问答**
 
 ```bash
-python ask.py
-> 斯普拉滚筒的伤害是多少？
-> 有什么适合新手的武器？
-> /add 红牙刷=斯普拉射击枪    # 添加俗称映射
-> /list                        # 查看所有映射
-> exit                         # 退出
+python ask.py              # 默认模式
+python ask.py --debug      # 调试模式
+python ask.py -q           # 安静模式
 ```
 
-**方式二：HTTP API**
+**HTTP API**
 
 ```bash
 python server.py --port 8000
-```
-
-```bash
-# 新会话提问（session_id 为 0 或省略 → 自动创建）
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "斯普拉滚筒的伤害是多少？"}'
-# → {"answer": "...", "session_id": 1}
-
-# 继续同一会话（带上上次返回的 session_id）
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "它的次要武器是什么", "session_id": 1}'
-
-# 手动开启新会话
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "/new"}'
-# → {"answer": "New session #2 started.", "session_id": 2}
-
-# 健康检查
-curl http://localhost:8000/health
-
 # 浏览器打开 http://localhost:8000/docs 有 Swagger 调试页面
 ```
 
-**方式三：独立 .exe（无需 Python 环境）**
+**独立 .exe**
 
 ```bash
-# 本地操作
-python build_tfidf.py            # 1. 构建 TF-IDF 索引
-python build_embeddings.py       # 2. 构建稠密向量（可选）
-python package.py                # 3. 打包成 dist/ 文件夹
-
-# 把 dist/ 整个复制到目标机器
-# 在 dist/ 里创建 .env（写入 DEEPSEEK_API_KEY=xxx）
-# 双击 rag-server.exe 即可
+python build_tfidf.py      # 1. 构建索引
+python package.py          # 2. 打包成 dist/ 文件夹
+# 把 dist/ 复制到目标机器，创建 .env，双击 rag-server.exe
 ```
 
 ## 使用说明
@@ -312,9 +274,10 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 | `ask.py` | 命令行问答界面 |
 | `server.py` | HTTP API 服务器（FastAPI + uvicorn） |
 | `package.py` | 打包成独立 .exe |
-| `crawl.py` | 知识数据爬取脚本 |
-| `knowledge/wiki_cn/` | 167 个武器知识 .md 文件 |
-| `knowledge/glossary.md` | 俗称 → 正式名映射表 |
+| `crawl.py` | 中文武器数据爬取 |
+| `crawl_en.py` | 英文武器数据爬取 |
+| `setup.bat` / `setup.sh` | 一键设置脚本 |
+| `knowledge/glossary.md` | 俗称 → 正式名映射表（手工维护） |
 | `requirements.txt` | Python 依赖 |
 
 ## 当前的 todo
@@ -326,6 +289,12 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 - [x] 引入向量检索（TF-IDF + 稠密向量混合检索，支持本地模型微调）
 - [x] 引入 SQLite 数据库（问答日志 + 俗称映射 + 会话历史 + 知识元数据）
 - [ ] 参考 [小鱿鱿](https://github.com/Cypas/splatoon3-schedule) 的翻译数据，丰富知识来源
+
+## 数据来源
+
+- 中文武器数据：[splatoon.com.cn](https://splatoon.com.cn)
+- 英文武器数据：[Inkipedia](https://splatoonwiki.org)（CC BY-SA 协议）
+- 俗称对照表：手工整理
 
 ## License
 

@@ -47,7 +47,23 @@
       "Bash(curl -s -X POST http://localhost:8765/ask -H \"Content-Type: application/json\" -d \"{\\\\\"question\\\\\": \\\\\"hello\\\\\"}\")",
       "Bash(netstat -ano)",
       "Bash(taskkill /F /PID 79760)",
-      "Bash(taskkill //F //PID 79760)"
+      "Bash(taskkill //F //PID 79760)",
+      "Bash(git stash *)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force --index-filter \"git rm --cached --ignore-unmatch -r knowledge/wiki_cn/ knowledge/picture/ knowledge/picture_ocr/\" --prune-empty -- --all)",
+      "Bash(git reflog *)",
+      "Bash(git gc *)",
+      "Bash(git update-ref *)",
+      "Bash(python d:/run/ask177/crawl_en.py)",
+      "Bash(git fetch *)",
+      "Bash(git fsck *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 10 https://github.com)",
+      "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\); print\\('DB cleared'\\)\")",
+      "Bash(rm -f index.pkl)",
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); from database import Database; db = Database\\(\\); k = db.load_knowledge\\(\\); nicks = k.get\\('nicknames', {}\\); he = nicks.get\\('Heavy Edit Splatling.md', []\\); print\\('Heavy Edit Splatling nicknames:'\\); [print\\(f'  {repr\\(n\\)}'\\) for n in he]; print\\('Files:', len\\(k['file_names']\\)\\)\")",
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); from database import Database; from simple_rag import SimpleRAG, load_dotenv; env = load_dotenv\\(\\); rag = SimpleRAG\\(api_key=env['DEEPSEEK_API_KEY'], verbose=False\\); db = Database\\(\\); rag.load_cache\\('index.pkl', force=True, db=db\\); rag._glossary = db.load_glossary\\(\\); answer = rag.ask\\('介绍一下审查者'\\); print\\(answer[:200]\\); info = rag._last_query_info; print\\(\\); print\\('hit_files:', info['hit_files']\\)\")",
+      "Bash(git config *)",
+      "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\); print\\('cleared'\\)\")",
+      "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\)\")"
     ]
   }
 }
