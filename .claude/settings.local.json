@@ -7,7 +7,7 @@
       "Bash(ls *.py)",
       "Bash(ls *.pkl)",
       "Bash(ls *.json)",
-      "Bash(python build.py)",
+      "Bash(python build_tfidf.py)",
       "Bash(python -c ' *)",
       "Bash(git rm *)",
       "Bash(python crawl.py 208)",
@@ -21,7 +21,14 @@
       "Bash(python crawl.py 1-300)",
       "Bash(python crawl.py 192)",
       "Bash(git -C d:/run/ask177 status --short)",
-      "Bash(git -C d:/run/ask177 log --oneline -10)"
+      "Bash(git -C d:/run/ask177 log --oneline -10)",
+      "Bash(.venv/Scripts/pip list *)",
+      "WebSearch",
+      "Bash(python -c \"import openai; print\\(openai.__version__\\)\")",
+      "Bash(python -c \"from openai import OpenAI; c = OpenAI\\(api_key='sk-test', base_url='https://api.deepseek.com'\\); print\\(dir\\(c.embeddings\\)\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); py_compile.compile\\('build_tfidf.py', doraise=True\\); py_compile.compile\\('build_embeddings.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(git mv *)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('simple_rag.py', doraise=True\\); print\\('OK'\\)\")"
     ]
   }
 }

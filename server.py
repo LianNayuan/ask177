@@ -88,7 +88,7 @@ if __name__ == "__main__":
     rag = SimpleRAG(api_key=API_KEY, verbose=False)
     if not rag.load_cache(cache_file, force=True):
         print(f"Error: {cache_file} not found.")
-        print("Build it locally: python build.py")
+        print("Build it locally: python build_tfidf.py")
         print("Then upload index.pkl to the server.")
         sys.exit(1)
 

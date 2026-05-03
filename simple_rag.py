@@ -73,12 +73,32 @@ class TfidfRetriever:
 
     def search_diverse(self, query: str, sources: list[str], top_k: int = 10,
                        per_file: int = 2,
-                       file_filter: set[str] | None = None) -> list[tuple[str, float]]:
+                       file_filter: set[str] | None = None,
+                       dense_scores: list[float] | None = None,
+                       dense_weight: float = 0.5) -> list[tuple[str, float]]:
         """Retrieve top chunks while ensuring each source file gets at least 1 slot.
-        If file_filter is given, only consider chunks from those files."""
+        If file_filter is given, only consider chunks from those files.
+        If dense_scores is provided, fuse with TF-IDF via weighted sum."""
         qv = self._query_vec(query)
         scored = [(c, self._dot(qv, dv), src)
                   for (c, dv), src in zip(zip(self.chunks, self._doc_vecs), sources)]
+
+        # Hybrid fusion: min-max normalize both score sets, weighted sum
+        if dense_scores is not None and len(dense_scores) == len(scored):
+            max_tfidf = max(s for _, s, _ in scored) if scored else 1.0
+            max_dense = max(dense_scores) if dense_scores else 1.0
+            if max_tfidf == 0:
+                max_tfidf = 1.0
+            if max_dense == 0:
+                max_dense = 1.0
+            fused = []
+            for i, (c, tfidf_s, src) in enumerate(scored):
+                tfidf_norm = tfidf_s / max_tfidf
+                dense_norm = dense_scores[i] / max_dense
+                combined = (1 - dense_weight) * tfidf_norm + dense_weight * dense_norm
+                fused.append((c, combined, src))
+            scored = fused
+
         if file_filter:
             scored = [(c, s, src) for c, s, src in scored if src in file_filter]
             if not scored:
@@ -132,6 +152,53 @@ class TfidfRetriever:
         return obj
 
 
+# ── Dense Retriever ──────────────────────────────────────────────
+
+class DenseRetriever:
+    """Dense vector retriever using cosine similarity on pre-computed embeddings.
+    Zero external dependencies — pure Python math."""
+
+    def __init__(self, chunks: list[str], embeddings: list[list[float]]):
+        self.chunks = chunks
+        self._embeddings = [self._l2_normalize(e) for e in embeddings]
+        self._dim = len(embeddings[0]) if embeddings else 0
+
+    @staticmethod
+    def _l2_normalize(vec: list[float]) -> list[float]:
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm == 0:
+            return vec
+        return [x / norm for x in vec]
+
+    @staticmethod
+    def _dot(a: list[float], b: list[float]) -> float:
+        return sum(x * y for x, y in zip(a, b))
+
+    def score_all(self, query_embedding: list[float]) -> list[float]:
+        """Return cosine similarity score for every chunk (for hybrid fusion)."""
+        qv = self._l2_normalize(query_embedding)
+        return [self._dot(qv, ev) for ev in self._embeddings]
+
+    def search(self, query_embedding: list[float], top_k: int = 3
+               ) -> list[tuple[str, float]]:
+        """Top-k semantic search."""
+        qv = self._l2_normalize(query_embedding)
+        scored = [(c, self._dot(qv, ev)) for c, ev in zip(self.chunks, self._embeddings)]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    def _state(self) -> dict:
+        return {"embeddings": self._embeddings, "chunks": self.chunks}
+
+    @classmethod
+    def _from_state(cls, state: dict) -> "DenseRetriever":
+        obj = cls.__new__(cls)
+        obj._embeddings = state["embeddings"]
+        obj.chunks = state["chunks"]
+        obj._dim = len(obj._embeddings[0]) if obj._embeddings else 0
+        return obj
+
+
 # ── RAG Engine ────────────────────────────────────────────────────
 
 class SimpleRAG:
@@ -152,7 +219,11 @@ class SimpleRAG:
     DEEPSEEK_BASE = "https://api.deepseek.com"
 
     def __init__(self, api_key: str | None = None, model: str = "deepseek-chat",
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 embedding_model: str | None = None,
+                 embedding_api_key: str | None = None,
+                 embedding_base_url: str | None = None,
+                 dense_weight: float = 0.5):
         key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         self._client = OpenAI(api_key=key, base_url=self.DEEPSEEK_BASE)
         self._verbose = verbose
@@ -165,6 +236,17 @@ class SimpleRAG:
         self._nicknames: dict[str, list[str]] = {}   # file name → nicknames
         self._glossary: dict[str, str] = {}          # slang → formal
         self._retriever: TfidfRetriever | None = None
+
+        # Dense retrieval
+        self._embedding_model = embedding_model
+        self._embedding_api_key = embedding_api_key or key
+        self._embedding_base_url = embedding_base_url or self.DEEPSEEK_BASE
+        self._dense_weight = dense_weight
+        self._embeddings: list[list[float]] = []
+        self._embedding_model_used: str = ""
+        self._dense_retriever: DenseRetriever | None = None
+        self._embedding_client: OpenAI | None = None
+        self._local_embedding_model: object | None = None  # lazily loaded SentenceTransformer
 
     # ── Build ────────────────────────────────────────────────────
 
@@ -224,6 +306,90 @@ class SimpleRAG:
         if self._verbose and result != question:
             print(f"[Rewrite] 最终: {question!r} → {result!r}")
         return result
+
+    # ── Dense embeddings ─────────────────────────────────────────
+
+    def _get_embedding_client(self) -> OpenAI:
+        if self._embedding_client is None:
+            self._embedding_client = OpenAI(
+                api_key=self._embedding_api_key,
+                base_url=self._embedding_base_url)
+        return self._embedding_client
+
+    def _load_local_embedding_model(self) -> object | None:
+        """Lazy-load the local SentenceTransformer model. Returns None on failure."""
+        if self._local_embedding_model is not None:
+            return self._local_embedding_model
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            if self._verbose:
+                print("[Embed] sentence-transformers not installed, cannot use local model")
+            return None
+        try:
+            if self._verbose:
+                print(f"[Embed] Loading local model: {self._embedding_model}")
+            self._local_embedding_model = SentenceTransformer(self._embedding_model)
+            return self._local_embedding_model
+        except Exception as e:
+            if self._verbose:
+                print(f"[Embed] Failed to load local model: {e}")
+            return None
+
+    def _is_deepseek_model(self) -> bool:
+        return bool(self._embedding_model and self._embedding_model.startswith("deepseek-"))
+
+    def _embed_query(self, query: str) -> list[float] | None:
+        """Get dense embedding for a single query. Returns None on failure."""
+        if not self._embedding_model:
+            return None
+
+        if self._is_deepseek_model():
+            return self._embed_query_api(query)
+        else:
+            return self._embed_query_local(query)
+
+    def _embed_query_api(self, query: str) -> list[float] | None:
+        try:
+            client = self._get_embedding_client()
+            resp = client.embeddings.create(
+                model=self._embedding_model,
+                input=query,
+            )
+            return resp.data[0].embedding
+        except Exception as e:
+            if self._verbose:
+                print(f"[Embed] API query embedding failed: {e}")
+            return None
+
+    def _embed_query_local(self, query: str) -> list[float] | None:
+        model = self._load_local_embedding_model()
+        if model is None:
+            return None
+        try:
+            emb = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
+            return emb[0].tolist() if hasattr(emb, "tolist") else list(emb[0])
+        except Exception as e:
+            if self._verbose:
+                print(f"[Embed] Local query embedding failed: {e}")
+            return None
+
+    def _embed_chunks(self, chunks: list[str],
+                      batch_size: int = 100) -> list[list[float]]:
+        """Embed all chunks via API (build-time only, not used at query time)."""
+        client = self._get_embedding_client()
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            resp = client.embeddings.create(
+                model=self._embedding_model,
+                input=batch,
+            )
+            all_embeddings.extend([d.embedding for d in resp.data])
+            if self._verbose:
+                done = min(i + batch_size, len(chunks))
+                print(f"[Embed] {done}/{len(chunks)} chunks embedded")
+        return all_embeddings
 
     @staticmethod
     def _extract_title(text: str) -> str | None:
@@ -426,11 +592,14 @@ class SimpleRAG:
             "nicknames": self._nicknames,
             "glossary": self._glossary,
             "retriever": self._retriever._state(),
+            "embeddings": self._embeddings,
+            "embedding_model_used": self._embedding_model_used,
         }
         with open(path, "wb") as f:
             pickle.dump(data, f)
         if self._verbose:
-            print(f"[Cache] Saved {len(self._chunks)} chunks to {path}")
+            emb_info = f", {len(self._embeddings)} dense vectors" if self._embeddings else ", NO dense embeddings"
+            print(f"[Cache] Saved {len(self._chunks)} chunks{emb_info} → {path}")
 
     def load_cache(self, path: str = "index.pkl", force: bool = False) -> bool:
         """Load cached chunks and retriever. Returns True if cache was loaded.
@@ -462,8 +631,24 @@ class SimpleRAG:
         self._nicknames = data.get("nicknames", {})
         self._glossary = data.get("glossary", {})
         self._retriever = TfidfRetriever._from_state(data["retriever"])
+
+        # Load dense embeddings if present (backward compatible)
+        self._embeddings = data.get("embeddings", [])
+        self._embedding_model_used = data.get("embedding_model_used", "")
+        if self._embeddings:
+            self._dense_retriever = DenseRetriever(self._chunks, self._embeddings)
+            # If no embedding model is configured, use the one from cache
+            if not self._embedding_model:
+                self._embedding_model = self._embedding_model_used
+
         if self._verbose:
-            print(f"[Cache] Loaded {len(self._chunks)} chunks from {path}")
+            if self._embeddings:
+                print(f"[Cache] Loaded {len(self._chunks)} chunks,"
+                      f" {len(self._embeddings)} dense vectors"
+                      f" ({self._embedding_model_used}) from {path}")
+            else:
+                print(f"[Cache] Loaded {len(self._chunks)} chunks,"
+                      f" NO dense embeddings from {path}")
         return True
 
     def is_fresh(self, cache_path: str = "index.pkl") -> bool:
@@ -523,9 +708,35 @@ class SimpleRAG:
             else:
                 print(f"[Title match] no match, searching all files")
 
+        # Get dense embedding scores (if DenseRetriever is available)
+        dense_scores = None
+        if self._dense_retriever and self._embedding_model:
+            query_emb = self._embed_query(search_query)
+            if query_emb is not None:
+                dense_scores = self._dense_retriever.score_all(query_emb)
+                if self._verbose:
+                    print(f"[Dense] using dense scores, model={self._embedding_model}")
+                    # Show top-N dense-only hits so user can see what vector search matched
+                    dense_top = sorted(enumerate(dense_scores), key=lambda x: x[1], reverse=True)
+                    print(f"[Dense] top-5 dense-only hits:")
+                    for rank, (idx, score) in enumerate(dense_top[:5]):
+                        src = self._sources[idx] if idx < len(self._sources) else "?"
+                        snippet = self._chunks[idx][:80].replace("\n", " ") if idx < len(self._chunks) else "?"
+                        print(f"[Dense]   [{rank}] score={score:.4f}  file={src}")
+                        print(f"[Dense]        text: {snippet}...")
+            elif self._verbose:
+                print(f"[Dense] query embedding failed, falling back to TF-IDF only")
+        elif self._verbose:
+            if self._dense_retriever is None:
+                print(f"[Dense] no DenseRetriever loaded, using TF-IDF only")
+            else:
+                print(f"[Dense] no embedding model configured, using TF-IDF only")
+
         results = self._retriever.search_diverse(
             search_query, self._sources, top_k=top_k, per_file=2,
-            file_filter=relevant)
+            file_filter=relevant,
+            dense_scores=dense_scores,
+            dense_weight=self._dense_weight)
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
 
         if debug_chunks:

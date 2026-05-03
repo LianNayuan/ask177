@@ -1,7 +1,7 @@
 """Package the server into a standalone executable (no Python needed on target).
 
 Usage:
-  python build.py          # 1. Build the index first
+  python build_tfidf.py    # 1. Build the index first
   python package.py        # 2. Package into dist/ folder
   # Then copy the dist/ folder to any machine and run rag-server.exe
 """
@@ -18,7 +18,7 @@ EXE_NAME = "rag-server"
 def main():
     # 1. Check prerequisites
     if not Path("index.pkl").exists():
-        print("Error: index.pkl not found. Run 'python build.py' first.")
+        print("Error: index.pkl not found. Run 'python build_tfidf.py' first.")
         sys.exit(1)
 
     print("Building standalone executable with PyInstaller...")

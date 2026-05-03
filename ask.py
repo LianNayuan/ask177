@@ -49,11 +49,19 @@ if __name__ == "__main__":
     rag = SimpleRAG(api_key=API_KEY, verbose=verbose)
 
     if not rag.load_cache(CACHE_FILE):
-        print("No cache found. Run build.py first.")
+        print("No cache found. Run build_tfidf.py first.")
         sys.exit(1)
 
-    print(f"=== RAG Q&A (DeepSeek) ===\n"
+    # Show retrieval mode
+    if rag._dense_retriever is not None:
+        mode = f"TF-IDF + Dense ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
+    else:
+        mode = "TF-IDF only (no dense embeddings)"
+        print("  Hint: run 'python build_embeddings.py' for semantic search.")
+
+    print(f"\n=== RAG Q&A (DeepSeek) ===\n"
           f"{len(rag._file_names)} files, {len(rag._chunks)} chunks\n"
+          f"Retrieval: {mode}\n"
           f"Commands: /add slang=formal  /list  /del slang\n")
 
     while True:

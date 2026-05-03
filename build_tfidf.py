@@ -1,9 +1,11 @@
-"""Build index: load files → chunk → cache to disk. Run once, or when files change.
+"""Build TF-IDF index: load files → chunk → cache to disk. Run once, or when files change.
 
 Usage:
-  python build.py              # auto-detect changed files, incremental update
-  python build.py --file X.md  # force re-process specific file(s)
-  python build.py -f X.md Y.md # same, multiple files
+  python build_tfidf.py              # auto-detect changed files, incremental update
+  python build_tfidf.py --file X.md  # force re-process specific file(s)
+  python build_tfidf.py -f X.md Y.md # same, multiple files
+
+For dense embeddings, run python build_embeddings.py separately.
 """
 
 import sys
@@ -26,7 +28,7 @@ if __name__ == "__main__":
         print("Missing DEEPSEEK_API_KEY in .env file.")
         sys.exit(1)
 
-    # Parse --file / -f
+    # Parse args
     force_files: list[str] = []
     args = sys.argv[1:]
     i = 0
