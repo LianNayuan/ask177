@@ -63,7 +63,10 @@
       "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); from database import Database; from simple_rag import SimpleRAG, load_dotenv; env = load_dotenv\\(\\); rag = SimpleRAG\\(api_key=env['DEEPSEEK_API_KEY'], verbose=False\\); db = Database\\(\\); rag.load_cache\\('index.pkl', force=True, db=db\\); rag._glossary = db.load_glossary\\(\\); answer = rag.ask\\('介绍一下审查者'\\); print\\(answer[:200]\\); info = rag._last_query_info; print\\(\\); print\\('hit_files:', info['hit_files']\\)\")",
       "Bash(git config *)",
       "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\); print\\('cleared'\\)\")",
-      "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\)\")"
+      "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\)\")",
+      "Bash(git reset *)",
+      "Bash(python crawl.py 1-50)",
+      "Bash(git ls-tree *)"
     ]
   }
 }
