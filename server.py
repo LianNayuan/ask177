@@ -92,6 +92,8 @@ def create_app():
             rewrite=info.get("rewrite", ""),
             latency_ms=elapsed_ms,
             session_id=sid,
+            prompt_tokens=info.get("prompt_tokens", 0),
+            completion_tokens=info.get("completion_tokens", 0),
             error=error,
         )
 
@@ -102,6 +104,8 @@ def create_app():
             "session_id": sid,
             "mode": info.get("mode", ""),
             "latency_ms": elapsed_ms,
+            "prompt_tokens": info.get("prompt_tokens", 0),
+            "completion_tokens": info.get("completion_tokens", 0),
             "hit_files": info.get("hit_files", ""),
             "rewrite": info.get("rewrite", ""),
             "error": error,

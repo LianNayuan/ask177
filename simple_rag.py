@@ -962,6 +962,9 @@ class SimpleRAG:
                 max_tokens=80,
                 messages=[{"role": "user", "content": prompt}],
             )
+            if hasattr(resp, 'usage') and resp.usage:
+                self._q_prompt_tokens += resp.usage.prompt_tokens or 0
+                self._q_completion_tokens += resp.usage.completion_tokens or 0
             result = resp.choices[0].message.content.strip()
             # Strip any quotes the model might add
             result = result.strip('"\'')
@@ -982,8 +985,13 @@ class SimpleRAG:
                 "question": question, "search_query": question,
                 "rewrite": "", "hit_files": "", "mode": "error",
                 "dense_source": None, "error": "No documents loaded",
+                "prompt_tokens": 0, "completion_tokens": 0,
             }
             return "No documents loaded. Call .load() or .load_cache() first."
+
+        # Track token usage across all LLM calls in this query
+        self._q_prompt_tokens = 0
+        self._q_completion_tokens = 0
 
         # ── Stage 1: Query rewriting ──────────────────────────────
         # Let the LLM resolve pronouns, combine clarifications, and expand
@@ -1125,6 +1133,8 @@ class SimpleRAG:
             "mode": ret_mode,
             "dense_source": dense_source,
             "error": "",
+            "prompt_tokens": self._q_prompt_tokens,
+            "completion_tokens": self._q_completion_tokens,
         }
 
         for attempt in range(3):
@@ -1134,8 +1144,13 @@ class SimpleRAG:
                     max_tokens=1024,
                     messages=messages,
                 )
+                if hasattr(resp, 'usage') and resp.usage:
+                    self._q_prompt_tokens += resp.usage.prompt_tokens or 0
+                    self._q_completion_tokens += resp.usage.completion_tokens or 0
                 answer = resp.choices[0].message.content
                 self._last_query_info["answer"] = answer
+                self._last_query_info["prompt_tokens"] = self._q_prompt_tokens
+                self._last_query_info["completion_tokens"] = self._q_completion_tokens
                 return answer
             except APIConnectionError as e:
                 if attempt < 2:

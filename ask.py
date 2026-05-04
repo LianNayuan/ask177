@@ -236,6 +236,14 @@ if __name__ == "__main__":
             print(f"  Errors:           {s.get('error_count', 0)}")
             print(f"  Sessions:         {s.get('session_count', 0)}")
             print(f"  Glossary entries: {s['glossary_entries']}")
+            pt = s.get('prompt_tokens', 0)
+            ct = s.get('completion_tokens', 0)
+            print(f"  Prompt tokens:    {pt:,}")
+            print(f"  Completion tokens:{ct:,}")
+            print(f"  Total tokens:     {s.get('total_tokens', 0):,}")
+            # Estimate: deepseek-chat ~$0.14/1M input, $0.28/1M output
+            cost = pt / 1_000_000 * 0.14 + ct / 1_000_000 * 0.28
+            print(f"  Est. cost (USD):  ${cost:.4f}")
             print(f"  Retrieval modes:  {s['retrieval_modes']}")
             print()
             continue
@@ -275,13 +283,20 @@ if __name__ == "__main__":
             rewrite=info.get("rewrite", ""),
             latency_ms=elapsed_ms,
             session_id=conv_id,
+            prompt_tokens=info.get("prompt_tokens", 0),
+            completion_tokens=info.get("completion_tokens", 0),
             error=error,
         )
 
         print(f"\n{answer}\n")
         if verbose:
+            pt = info.get("prompt_tokens", 0)
+            ct = info.get("completion_tokens", 0)
+            cost = pt / 1_000_000 * 0.14 + ct / 1_000_000 * 0.28
             print(f"  [{elapsed_ms}ms, {info.get('mode', '?')},"
                   f" hits: {info.get('hit_files', '?')}]")
+            print(f"  [tokens: {pt}↑ + {ct}↓ = {pt + ct}, "
+                  f"est. ${cost:.5f}]")
             if info.get("rewrite"):
                 print(f"  [rewrite: {info['question']} → {info['rewrite']}]")
             print()

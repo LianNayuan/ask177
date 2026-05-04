@@ -26,6 +26,8 @@ class Database:
                 rewrite     TEXT,
                 latency_ms  INTEGER,
                 session_id  INTEGER DEFAULT 0,
+                prompt_tokens   INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
                 error       TEXT,
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -86,6 +88,8 @@ class Database:
         """)
         # Migrations: add columns that may not exist in older databases
         for col, col_def in [("session_id", "INTEGER DEFAULT 0"),
+                             ("prompt_tokens", "INTEGER DEFAULT 0"),
+                             ("completion_tokens", "INTEGER DEFAULT 0"),
                              ("error", "TEXT")]:
             try:
                 self._conn.execute(f"ALTER TABLE query_logs ADD COLUMN {col} {col_def}")
@@ -97,13 +101,14 @@ class Database:
 
     def log_query(self, question: str, answer: str, mode: str = "",
                   hit_files: str = "", rewrite: str = "", latency_ms: int = 0,
-                  session_id: int = 0, error: str = "") -> int:
+                  session_id: int = 0, prompt_tokens: int = 0,
+                  completion_tokens: int = 0, error: str = "") -> int:
         cur = self._conn.execute(
             "INSERT INTO query_logs (question, answer, mode, hit_files, rewrite,"
-            " latency_ms, session_id, error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " latency_ms, session_id, prompt_tokens, completion_tokens, error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (question, answer, mode, hit_files, rewrite, latency_ms,
-             session_id, error))
+             session_id, prompt_tokens, completion_tokens, error))
         self._conn.commit()
         return cur.lastrowid
 
@@ -171,6 +176,11 @@ class Database:
         sessions = self._conn.execute(
             "SELECT COUNT(DISTINCT session_id) as n FROM query_logs WHERE session_id > 0"
         ).fetchone()["n"]
+        tokens = self._conn.execute(
+            "SELECT SUM(prompt_tokens) as p, SUM(completion_tokens) as c"
+            " FROM query_logs").fetchone()
+        prompt_tokens = tokens["p"] or 0
+        completion_tokens = tokens["c"] or 0
         modes = {}
         for r in self._conn.execute(
                 "SELECT mode, COUNT(*) as n FROM query_logs GROUP BY mode"):
@@ -182,6 +192,9 @@ class Database:
             "avg_latency_ms": round(avg_latency or 0),
             "error_count": errors,
             "session_count": sessions,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
             "retrieval_modes": modes,
             "glossary_entries": glossary_count,
         }
