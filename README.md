@@ -117,21 +117,39 @@ python build_tfidf.py -f A.md -f B.md          # 强制重处理多个文件
 
 | 参数 | 说明 |
 |------|------|
-| *(无)* | 本地模型模式，`BAAI/bge-small-zh-v1.5` |
+| *(无)* | 本地模型模式，`BAAI/bge-small-zh-v1.5`，存入 `index.pkl` |
+| `--chroma` | 用 ChromaDB 持久化存储向量（推荐） |
 | `--mode local` | 明确指定本地模型模式 |
 | `--mode api` | DeepSeek embedding API 模式（无需额外依赖） |
 | `--model <name>` | 指定模型名或本地路径（支持微调后的模型） |
 | `--force` | 覆盖已有的向量（默认不覆盖） |
 
 ```bash
-python build_embeddings.py                         # 本地模型（需 pip install sentence-transformers）
-python build_embeddings.py --mode api              # API 模式，无需额外安装
-python build_embeddings.py --model ./my-finetuned  # 使用微调的本地模型
-python build_embeddings.py --force                 # 覆盖已有向量
+python build_embeddings.py --chroma                    # ChromaDB 持久化（推荐）
+python build_embeddings.py                             # 本地模型存入 index.pkl
+python build_embeddings.py --mode api                  # API 模式，无需额外安装
+python build_embeddings.py --model ./my-finetuned      # 使用微调的本地模型
+python build_embeddings.py --chroma --force            # 覆盖已有向量
 ```
 
 - 必须先运行 `build_tfidf.py`（需要 `index.pkl`）
+- `--chroma` 存入 `chroma_db/` 目录，查询时无需重新加载模型
 - 不运行时系统退化为纯 TF-IDF 检索，不影响使用
+
+### build_glossary.py — 俗称映射同步
+
+| 参数 | 说明 |
+|------|------|
+| *(无)* | 将 `knowledge/glossary.md` 全量同步到数据库 |
+| `--dry-run` | 预览差异，不写入 |
+
+```bash
+python build_glossary.py              # 同步
+python build_glossary.py --dry-run    # 预览
+```
+
+- `knowledge/glossary.md` 手工维护，格式：`口语词 | 正式名`
+- 首次运行 `ask.py` 或 `server.py` 时会自动导入；改了文件后手动运行本脚本同步
 
 ### ask.py — 命令行问答
 
@@ -140,6 +158,8 @@ python build_embeddings.py --force                 # 覆盖已有向量
 | *(无)* | 默认模式，打印检索日志（改写、匹配等） |
 | `--debug` | 额外打印每个 chunk 的匹配分数和来源文件 |
 | `-q` | 安静模式，只输出答案，不打印日志 |
+| `--mode <mode>` | 检索模式：`tfidf` / `dense` / `hybrid`（默认 hybrid） |
+| `--dense-weight <n>` | 混合检索中稠密向量的权重，0.0~1.0（默认 0.5） |
 
 ```
 交互命令：
@@ -156,9 +176,12 @@ python build_embeddings.py --force                 # 覆盖已有向量
 ```
 
 ```bash
-python ask.py              # 默认模式
-python ask.py --debug      # 调试模式（查看检索细节）
-python ask.py -q           # 安静模式
+python ask.py                                # 默认模式
+python ask.py --debug                        # 调试模式（查看检索细节）
+python ask.py -q                             # 安静模式
+python ask.py --mode tfidf                   # 纯 TF-IDF 检索
+python ask.py --mode dense                   # 纯向量检索
+python ask.py --mode hybrid --dense-weight 0.7  # 混合检索，调高向量权重
 ```
 
 ### server.py — HTTP API
@@ -168,6 +191,8 @@ python ask.py -q           # 安静模式
 | `--host <ip>` | 监听地址，默认 `0.0.0.0` |
 | `--port <n>` | 监听端口，默认 `8000` |
 | `--cache <path>` | 索引文件路径，默认 `index.pkl` |
+| `--mode <mode>` | 检索模式：`tfidf` / `dense` / `hybrid`（默认 hybrid） |
+| `--dense-weight <n>` | 混合检索中稠密向量的权重，0.0~1.0（默认 0.5） |
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -179,6 +204,7 @@ python ask.py -q           # 安静模式
 python server.py                                  # 默认 0.0.0.0:8000
 python server.py --host 127.0.0.1 --port 8080     # 仅本地
 python server.py --cache /path/to/index.pkl       # 指定索引文件
+python server.py --mode dense                     # 纯向量检索模式
 
 # 测试
 curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question":"斯普拉滚筒的伤害"}'
@@ -270,7 +296,8 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 | `simple_rag.py` | RAG 核心引擎：LLM 查询改写 + TF-IDF + 稠密向量检索 + DeepSeek 问答 |
 | `database.py` | SQLite 数据库：问答日志 + 俗称映射 + 会话历史 + 知识元数据 |
 | `build_tfidf.py` | TF-IDF 关键词索引构建（支持增量更新） |
-| `build_embeddings.py` | 稠密向量索引构建（本地模型 / API） |
+| `build_embeddings.py` | 稠密向量索引构建（本地模型 / API / ChromaDB） |
+| `build_glossary.py` | 俗称映射表同步（glossary.md → data.db） |
 | `ask.py` | 命令行问答界面 |
 | `server.py` | HTTP API 服务器（FastAPI + uvicorn） |
 | `package.py` | 打包成独立 .exe |

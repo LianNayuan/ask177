@@ -47,11 +47,30 @@ if __name__ == "__main__":
     # Parse flags
     verbose = True
     debug_chunks = False
-    for a in sys.argv[1:]:
+    retrieval_mode = "hybrid"
+    dense_weight = 0.5
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
         if a == "--debug":
             debug_chunks = True
+            i += 1
         elif a == "-q":
             verbose = False
+            i += 1
+        elif a == "--mode" and i + 1 < len(args):
+            retrieval_mode = args[i + 1]
+            if retrieval_mode not in ("tfidf", "dense", "hybrid"):
+                print(f"Invalid --mode: {retrieval_mode!r}. Use: tfidf, dense, hybrid")
+                sys.exit(1)
+            i += 2
+        elif a == "--dense-weight" and i + 1 < len(args):
+            dense_weight = float(args[i + 1])
+            if not (0.0 <= dense_weight <= 1.0):
+                print(f"Invalid --dense-weight: {dense_weight}. Must be 0.0 - 1.0")
+                sys.exit(1)
+            i += 2
         else:
             print(f"Unknown argument: {a}")
             sys.exit(1)
@@ -68,7 +87,9 @@ if __name__ == "__main__":
         if n > 0:
             print(f"[DB] Imported {n} glossary entries from {GLOSSARY_FILE}")
 
-    rag = SimpleRAG(api_key=API_KEY, verbose=verbose)
+    rag = SimpleRAG(api_key=API_KEY, verbose=verbose,
+                    retrieval_mode=retrieval_mode,
+                    dense_weight=dense_weight)
 
     if not rag.load_cache(CACHE_FILE, db=db):
         print("No cache found. Run build_tfidf.py first.")
@@ -78,10 +99,19 @@ if __name__ == "__main__":
     rag._glossary = db.load_glossary()
 
     # Show retrieval mode
-    if rag._chroma_retriever is not None:
+    if rag._retrieval_mode == "tfidf":
+        mode = "TF-IDF only (forced by --mode)"
+    elif rag._retrieval_mode == "dense":
+        if rag._chroma_retriever is not None:
+            mode = f"Dense only / ChromaDB ({rag._embedding_model_used or 'unknown'})"
+        elif rag._dense_retriever is not None:
+            mode = f"Dense only / in-memory ({rag._embedding_model_used or 'unknown'})"
+        else:
+            mode = "Dense only (NO dense index available!)"
+    elif rag._chroma_retriever is not None:
         mode = f"TF-IDF + Dense/ChromaDB ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
     elif rag._dense_retriever is not None:
-        mode = f"TF-IDF + Dense ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
+        mode = f"TF-IDF + Dense/in-memory ({rag._embedding_model_used or 'unknown'}, weight={rag._dense_weight})"
     else:
         mode = "TF-IDF only (no dense embeddings)"
         print("  Hint: run 'python build_embeddings.py --chroma' for semantic search.")

@@ -66,7 +66,20 @@
       "Bash(python -c \"from database import Database; db = Database\\(\\); db.clear_knowledge\\(\\)\")",
       "Bash(git reset *)",
       "Bash(python crawl.py 1-50)",
-      "Bash(git ls-tree *)"
+      "Bash(git ls-tree *)",
+      "Bash(git push *)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('d:/run/ask177/simple_rag.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/ask.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/server.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import pickle; data=pickle.load\\(open\\('d:/run/ask177/index.pkl','rb'\\)\\); print\\('embeddings:', len\\(data.get\\('embeddings',[]\\)\\), 'chroma_db:', data.get\\('chroma_db','N/A'\\)\\)\")",
+      "Bash(timeout 20 python ask.py --mode tfidf -q)",
+      "Bash(timeout 20 python ask.py --mode hybrid -q)",
+      "Bash(timeout 20 python ask.py --mode dense -q)",
+      "Bash(python build_embeddings.py --chroma)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('d:/run/ask177/simple_rag.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python build_glossary.py)",
+      "Bash(python build_glossary.py --dry-run)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   }
 }

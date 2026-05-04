@@ -95,6 +95,8 @@ if __name__ == "__main__":
     # Parse args
     host, port = "0.0.0.0", 8000
     cache_file = CACHE_FILE
+    retrieval_mode = "hybrid"
+    dense_weight = 0.5
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -107,6 +109,18 @@ if __name__ == "__main__":
         elif args[i] == "--cache" and i + 1 < len(args):
             cache_file = args[i + 1]
             i += 2
+        elif args[i] == "--mode" and i + 1 < len(args):
+            retrieval_mode = args[i + 1]
+            if retrieval_mode not in ("tfidf", "dense", "hybrid"):
+                print(f"Invalid --mode: {retrieval_mode!r}. Use: tfidf, dense, hybrid")
+                sys.exit(1)
+            i += 2
+        elif args[i] == "--dense-weight" and i + 1 < len(args):
+            dense_weight = float(args[i + 1])
+            if not (0.0 <= dense_weight <= 1.0):
+                print(f"Invalid --dense-weight: {dense_weight}. Must be 0.0 - 1.0")
+                sys.exit(1)
+            i += 2
         else:
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
@@ -117,7 +131,9 @@ if __name__ == "__main__":
         db.import_glossary_from_file(str(APP_DIR / "knowledge/glossary.md"))
 
     # Load index (force=True skips freshness check — no source .md files needed)
-    rag = SimpleRAG(api_key=API_KEY, verbose=False)
+    rag = SimpleRAG(api_key=API_KEY, verbose=False,
+                    retrieval_mode=retrieval_mode,
+                    dense_weight=dense_weight)
     if not rag.load_cache(cache_file, force=True, db=db):
         print(f"Error: {cache_file} not found and no knowledge in data.db.")
         print("Build it locally: python build_tfidf.py")

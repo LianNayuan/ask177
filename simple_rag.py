@@ -330,7 +330,8 @@ class SimpleRAG:
                  embedding_api_key: str | None = None,
                  embedding_base_url: str | None = None,
                  dense_weight: float = 0.5,
-                 chroma_db: str | None = None):
+                 chroma_db: str | None = None,
+                 retrieval_mode: str = "hybrid"):
         key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         self._client = OpenAI(api_key=key, base_url=self.DEEPSEEK_BASE)
         self._verbose = verbose
@@ -354,6 +355,9 @@ class SimpleRAG:
         self._dense_retriever: DenseRetriever | None = None
         self._chroma_retriever: ChromaRetriever | None = None
         self._chroma_db: str | None = chroma_db
+        if retrieval_mode not in ("tfidf", "dense", "hybrid"):
+            raise ValueError(f"retrieval_mode must be 'tfidf', 'dense', or 'hybrid', got: {retrieval_mode!r}")
+        self._retrieval_mode: str = retrieval_mode
         self._embedding_client: OpenAI | None = None
         self._local_embedding_model: object | None = None  # lazily loaded SentenceTransformer
         self._last_query_info: dict = {}  # metadata about the most recent query
@@ -876,8 +880,10 @@ class SimpleRAG:
                           f" NO dense embeddings"
                           f"{' + SQLite' if have_db else ' from ' + path}")
 
-        # Eagerly preload local embedding model
-        if (self._chroma_retriever or self._dense_retriever) and self._embedding_model \
+        # Eagerly preload local embedding model (skip when TF-IDF only)
+        if self._retrieval_mode != "tfidf" \
+                and (self._chroma_retriever or self._dense_retriever) \
+                and self._embedding_model \
                 and not self._is_deepseek_model():
             self._log(f"Preloading embedding model: {self._embedding_model}")
             self._load_local_embedding_model()
@@ -997,23 +1003,37 @@ class SimpleRAG:
         else:
             self._log(f"[Title match] no match, searching all files")
 
-        # Get dense embedding scores
+        # Get dense embedding scores based on retrieval mode
         dense_scores = None
         dense_source: str | None = None
-        if self._chroma_retriever and self._embedding_model:
-            query_emb = self._embed_query(search_query)
-            if query_emb is not None:
-                dense_scores = self._chroma_retriever.score_all(query_emb)
-                dense_source = "chroma"
-        elif self._dense_retriever and self._embedding_model:
-            query_emb = self._embed_query(search_query)
-            if query_emb is not None:
-                dense_scores = self._dense_retriever.score_all(query_emb)
-                dense_source = "memory"
+        dense_weight = self._dense_weight
+
+        if self._retrieval_mode == "tfidf":
+            self._log("[Retrieval] mode=tfidf, using TF-IDF only")
+        elif self._retrieval_mode in ("dense", "hybrid"):
+            if self._chroma_retriever and self._embedding_model:
+                query_emb = self._embed_query(search_query)
+                if query_emb is not None:
+                    dense_scores = self._chroma_retriever.score_all(query_emb)
+                    dense_source = "chroma"
+            elif self._dense_retriever and self._embedding_model:
+                query_emb = self._embed_query(search_query)
+                if query_emb is not None:
+                    dense_scores = self._dense_retriever.score_all(query_emb)
+                    dense_source = "memory"
+
+            if self._retrieval_mode == "dense":
+                if dense_scores is None:
+                    return ("Error: --mode dense requires dense embeddings, "
+                            "but none are available. Run: python build_embeddings.py --chroma")
+                dense_weight = 1.0
+                self._log("[Retrieval] mode=dense, using dense vectors only")
+            else:
+                self._log("[Retrieval] mode=hybrid")
 
         if dense_scores is not None:
             tag = f"[Dense/{dense_source}]"
-            self._log(f"{tag} using dense scores, model={self._embedding_model}")
+            self._log(f"{tag} using dense scores, model={self._embedding_model}, weight={dense_weight}")
             dense_top = sorted(enumerate(dense_scores), key=lambda x: x[1], reverse=True)
             self._log(f"{tag} top-5 hits:")
             for rank, (idx, score) in enumerate(dense_top[:5]):
@@ -1022,7 +1042,9 @@ class SimpleRAG:
                 self._log(f"{tag}   [{rank}] score={score:.4f}  file={src}")
                 self._log(f"{tag}        text: {snippet}...")
         else:
-            if self._chroma_retriever is None and self._dense_retriever is None:
+            if self._retrieval_mode == "tfidf":
+                self._log("[Dense] TF-IDF only mode (dense disabled by --mode)")
+            elif self._chroma_retriever is None and self._dense_retriever is None:
                 self._log("[Dense] no retriever loaded, using TF-IDF only")
             elif not self._embedding_model:
                 self._log("[Dense] no embedding model configured, using TF-IDF only")
@@ -1033,7 +1055,7 @@ class SimpleRAG:
             search_query, self._sources, top_k=top_k, per_file=2,
             file_filter=relevant,
             dense_scores=dense_scores,
-            dense_weight=self._dense_weight)
+            dense_weight=dense_weight)
 
         # ── Stage 3: Build context ────────────────────────────────
         context = "\n\n---\n\n".join(chunk for chunk, _ in results)
@@ -1075,7 +1097,11 @@ class SimpleRAG:
         # Collect query metadata for logging
         result_files = {self._sources[self._chunks.index(c)]
                         for c, _ in results if c in self._chunks}
-        if self._chroma_retriever:
+        if self._retrieval_mode == "tfidf":
+            ret_mode = "TF-IDF only"
+        elif self._retrieval_mode == "dense":
+            ret_mode = f"Dense only ({dense_source or 'unknown'})"
+        elif self._chroma_retriever:
             ret_mode = "TF-IDF + Dense/chroma"
         elif self._dense_retriever:
             ret_mode = "TF-IDF + Dense/memory"
