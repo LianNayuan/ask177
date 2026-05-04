@@ -1,6 +1,7 @@
 """SQLite database for query logs, glossary, and knowledge metadata."""
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -13,7 +14,12 @@ class Database:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._lock = threading.Lock()
         self._init_tables()
+
+    def _commit(self):
+        """Thread-safe commit. Caller must hold self._lock."""
+        self._conn.commit()
 
     def _init_tables(self):
         self._conn.executescript("""
@@ -95,7 +101,7 @@ class Database:
                 self._conn.execute(f"ALTER TABLE query_logs ADD COLUMN {col} {col_def}")
             except sqlite3.OperationalError:
                 pass  # column already exists
-        self._conn.commit()
+        self._commit()
 
     # ── Query logs ──────────────────────────────────────────────────
 
@@ -103,14 +109,15 @@ class Database:
                   hit_files: str = "", rewrite: str = "", latency_ms: int = 0,
                   session_id: int = 0, prompt_tokens: int = 0,
                   completion_tokens: int = 0, error: str = "") -> int:
-        cur = self._conn.execute(
-            "INSERT INTO query_logs (question, answer, mode, hit_files, rewrite,"
-            " latency_ms, session_id, prompt_tokens, completion_tokens, error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (question, answer, mode, hit_files, rewrite, latency_ms,
-             session_id, prompt_tokens, completion_tokens, error))
-        self._conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO query_logs (question, answer, mode, hit_files, rewrite,"
+                " latency_ms, session_id, prompt_tokens, completion_tokens, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (question, answer, mode, hit_files, rewrite, latency_ms,
+                 session_id, prompt_tokens, completion_tokens, error))
+            self._conn.commit()
+            return cur.lastrowid
 
     def recent_queries(self, limit: int = 20) -> list[sqlite3.Row]:
         return self._conn.execute(
@@ -129,15 +136,17 @@ class Database:
         return {r["slang"]: r["formal"] for r in rows}
 
     def add_glossary(self, slang: str, formal: str):
-        self._conn.execute(
-            "INSERT OR REPLACE INTO glossary (slang, formal) VALUES (?, ?)",
-            (slang, formal))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO glossary (slang, formal) VALUES (?, ?)",
+                (slang, formal))
+            self._commit()
 
     def del_glossary(self, slang: str) -> bool:
-        cur = self._conn.execute("DELETE FROM glossary WHERE slang = ?", (slang,))
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM glossary WHERE slang = ?", (slang,))
+            self._commit()
+            return cur.rowcount > 0
 
     def import_glossary_from_file(self, path: str) -> int:
         """Import slang|formal pairs from a file. Returns count added."""
@@ -158,10 +167,11 @@ class Database:
     # ── Feedback ────────────────────────────────────────────────────
 
     def add_feedback(self, query_id: int, rating: int, comment: str = ""):
-        self._conn.execute(
-            "INSERT OR REPLACE INTO feedback (query_id, rating, comment)"
-            " VALUES (?, ?, ?)", (query_id, rating, comment))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feedback (query_id, rating, comment)"
+                " VALUES (?, ?, ?)", (query_id, rating, comment))
+            self._commit()
 
     # ── Stats ───────────────────────────────────────────────────────
 
@@ -209,7 +219,7 @@ class Database:
                        nicknames: dict[str, list[str]],
                        meta: dict[str, str] | None = None):
         """Replace all knowledge metadata in a single transaction."""
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM knowledge_chunks")
             self._conn.execute("DELETE FROM knowledge_nicknames")
             self._conn.execute("DELETE FROM knowledge_files")
@@ -293,13 +303,14 @@ class Database:
 
     def clear_knowledge(self):
         """Remove all knowledge metadata (for rebuild)."""
-        self._conn.executescript("""
-            DELETE FROM knowledge_chunks;
-            DELETE FROM knowledge_nicknames;
-            DELETE FROM knowledge_files;
-            DELETE FROM knowledge_meta;
-        """)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript("""
+                DELETE FROM knowledge_chunks;
+                DELETE FROM knowledge_nicknames;
+                DELETE FROM knowledge_files;
+                DELETE FROM knowledge_meta;
+            """)
+            self._commit()
 
     def has_knowledge(self) -> bool:
         """Check if knowledge data exists in DB."""
@@ -311,28 +322,30 @@ class Database:
 
     def create_conversation(self, title: str = "") -> int:
         """Create a new conversation. Returns its id."""
-        cur = self._conn.execute(
-            "INSERT INTO conversations (title) VALUES (?)", (title,))
-        self._conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO conversations (title) VALUES (?)", (title,))
+            self._commit()
+            return cur.lastrowid
 
     def add_message(self, conversation_id: int, role: str, content: str,
                     hit_files: str = "") -> int:
         """Add a message to a conversation. Updates conversations.updated_at."""
-        cur = self._conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, hit_files)"
-            " VALUES (?, ?, ?, ?)",
-            (conversation_id, role, content, hit_files))
-        self._conn.execute(
-            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP"
-            " WHERE id = ?", (conversation_id,))
-        # Auto-set title from first user message
-        self._conn.execute(
-            "UPDATE conversations SET title = ?"
-            " WHERE id = ? AND title = ''",
-            (content[:40], conversation_id))
-        self._conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, hit_files)"
+                " VALUES (?, ?, ?, ?)",
+                (conversation_id, role, content, hit_files))
+            self._conn.execute(
+                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP"
+                " WHERE id = ?", (conversation_id,))
+            # Auto-set title from first user message
+            self._conn.execute(
+                "UPDATE conversations SET title = ?"
+                " WHERE id = ? AND title = ''",
+                (content[:40], conversation_id))
+            self._commit()
+            return cur.lastrowid
 
     def get_history(self, conversation_id: int, limit: int = 10
                     ) -> list[sqlite3.Row]:

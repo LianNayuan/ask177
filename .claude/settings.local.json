@@ -77,7 +77,12 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('d:/run/ask177/simple_rag.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(python build_glossary.py)",
       "Bash(python build_glossary.py --dry-run)",
-      "Bash(python -c \"import py_compile; py_compile.compile\\('d:/run/ask177/database.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/simple_rag.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/ask.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/server.py', doraise=True\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\('d:/run/ask177/database.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/simple_rag.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/ask.py', doraise=True\\); py_compile.compile\\('d:/run/ask177/server.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(python server.py --port 8000 --mode tfidf)",
+      "Bash(python stress_test.py --concurrency 5)",
+      "Bash(python stress_test.py --concurrency 5 --output stress_report.md)",
+      "Bash(taskkill //F //PID 84160)"
     ],
     "additionalDirectories": [
       "\\tmp"
