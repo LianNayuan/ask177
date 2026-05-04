@@ -25,6 +25,8 @@ class Database:
                 hit_files   TEXT,
                 rewrite     TEXT,
                 latency_ms  INTEGER,
+                session_id  INTEGER DEFAULT 0,
+                error       TEXT,
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -82,16 +84,26 @@ class Database:
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Migrations: add columns that may not exist in older databases
+        for col, col_def in [("session_id", "INTEGER DEFAULT 0"),
+                             ("error", "TEXT")]:
+            try:
+                self._conn.execute(f"ALTER TABLE query_logs ADD COLUMN {col} {col_def}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         self._conn.commit()
 
     # ── Query logs ──────────────────────────────────────────────────
 
     def log_query(self, question: str, answer: str, mode: str = "",
-                  hit_files: str = "", rewrite: str = "", latency_ms: int = 0) -> int:
+                  hit_files: str = "", rewrite: str = "", latency_ms: int = 0,
+                  session_id: int = 0, error: str = "") -> int:
         cur = self._conn.execute(
-            "INSERT INTO query_logs (question, answer, mode, hit_files, rewrite, latency_ms)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (question, answer, mode, hit_files, rewrite, latency_ms))
+            "INSERT INTO query_logs (question, answer, mode, hit_files, rewrite,"
+            " latency_ms, session_id, error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (question, answer, mode, hit_files, rewrite, latency_ms,
+             session_id, error))
         self._conn.commit()
         return cur.lastrowid
 
@@ -153,6 +165,12 @@ class Database:
             "SELECT COUNT(*) as n FROM query_logs").fetchone()["n"]
         avg_latency = self._conn.execute(
             "SELECT AVG(latency_ms) as n FROM query_logs").fetchone()["n"]
+        errors = self._conn.execute(
+            "SELECT COUNT(*) as n FROM query_logs WHERE error IS NOT NULL AND error != ''"
+        ).fetchone()["n"]
+        sessions = self._conn.execute(
+            "SELECT COUNT(DISTINCT session_id) as n FROM query_logs WHERE session_id > 0"
+        ).fetchone()["n"]
         modes = {}
         for r in self._conn.execute(
                 "SELECT mode, COUNT(*) as n FROM query_logs GROUP BY mode"):
@@ -162,6 +180,8 @@ class Database:
         return {
             "total_queries": total,
             "avg_latency_ms": round(avg_latency or 0),
+            "error_count": errors,
+            "session_count": sessions,
             "retrieval_modes": modes,
             "glossary_entries": glossary_count,
         }

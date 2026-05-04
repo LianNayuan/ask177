@@ -978,6 +978,11 @@ class SimpleRAG:
         """Ask a question about the loaded documents.
         history: prior turns in this conversation (role/content dicts)."""
         if not self._retriever or not self._chunks:
+            self._last_query_info = {
+                "question": question, "search_query": question,
+                "rewrite": "", "hit_files": "", "mode": "error",
+                "dense_source": None, "error": "No documents loaded",
+            }
             return "No documents loaded. Call .load() or .load_cache() first."
 
         # ── Stage 1: Query rewriting ──────────────────────────────
@@ -1024,6 +1029,11 @@ class SimpleRAG:
 
             if self._retrieval_mode == "dense":
                 if dense_scores is None:
+                    self._last_query_info = {
+                        "question": question_sanitized, "search_query": search_query,
+                        "rewrite": "", "hit_files": "", "mode": "Dense only (error)",
+                        "dense_source": None, "error": "No dense embeddings available",
+                    }
                     return ("Error: --mode dense requires dense embeddings, "
                             "but none are available. Run: python build_embeddings.py --chroma")
                 dense_weight = 1.0
@@ -1114,6 +1124,7 @@ class SimpleRAG:
             "hit_files": ", ".join(sorted(result_files)),
             "mode": ret_mode,
             "dense_source": dense_source,
+            "error": "",
         }
 
         for attempt in range(3):
@@ -1126,13 +1137,17 @@ class SimpleRAG:
                 answer = resp.choices[0].message.content
                 self._last_query_info["answer"] = answer
                 return answer
-            except APIConnectionError:
+            except APIConnectionError as e:
                 if attempt < 2:
                     wait = (attempt + 1) * 2
                     self._log(f"[Retry] Connection error, waiting {wait}s...")
                     time.sleep(wait)
                 else:
+                    self._last_query_info["error"] = f"API connection failed after 3 retries: {e}"
                     raise
+            except Exception as e:
+                self._last_query_info["error"] = f"LLM call failed: {e}"
+                raise
 
 
 # ── Helpers ───────────────────────────────────────────────────────

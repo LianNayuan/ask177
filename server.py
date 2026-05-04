@@ -54,20 +54,20 @@ def create_app():
 
     @app.post("/ask", response_model=AnswerResponse)
     def ask(req: QuestionRequest):
+        import time
+        import json as _json
+        t0 = time.time()
         if not req.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
 
         # Session management
         sid = req.session_id
         if sid and db.get_conversation(sid):
-            # Continuing an existing session
             pass
         elif req.question.strip() == "/new":
-            # Explicit new session request
             sid = db.create_conversation()
             return AnswerResponse(answer=f"New session #{sid} started.", session_id=sid)
         else:
-            # First message or invalid session_id → create new
             sid = db.create_conversation()
 
         # Load history and ask
@@ -75,10 +75,39 @@ def create_app():
         history = [{"role": r["role"], "content": r["content"]} for r in rows]
         answer = rag.ask(req.question, history=history)
         answer = SimpleRAG._sanitize(answer)
+        elapsed_ms = int((time.time() - t0) * 1000)
 
-        # Persist
+        # Persist conversation
         db.add_message(sid, "user", SimpleRAG._sanitize(req.question))
         db.add_message(sid, "assistant", answer)
+
+        # Log structured query record
+        info = rag._last_query_info
+        error = info.get("error", "")
+        qid = db.log_query(
+            question=SimpleRAG._sanitize(req.question),
+            answer=answer,
+            mode=info.get("mode", ""),
+            hit_files=info.get("hit_files", ""),
+            rewrite=info.get("rewrite", ""),
+            latency_ms=elapsed_ms,
+            session_id=sid,
+            error=error,
+        )
+
+        # Structured JSON log line for production monitoring
+        log_entry = _json.dumps({
+            "event": "query",
+            "qid": qid,
+            "session_id": sid,
+            "mode": info.get("mode", ""),
+            "latency_ms": elapsed_ms,
+            "hit_files": info.get("hit_files", ""),
+            "rewrite": info.get("rewrite", ""),
+            "error": error,
+            "question_preview": req.question[:80],
+        }, ensure_ascii=False)
+        print(log_entry, flush=True)
 
         return AnswerResponse(answer=answer, session_id=sid)
 

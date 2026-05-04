@@ -233,6 +233,8 @@ if __name__ == "__main__":
             s = db.stats()
             print(f"  Total queries:    {s['total_queries']}")
             print(f"  Avg latency:      {s['avg_latency_ms']}ms")
+            print(f"  Errors:           {s.get('error_count', 0)}")
+            print(f"  Sessions:         {s.get('session_count', 0)}")
             print(f"  Glossary entries: {s['glossary_entries']}")
             print(f"  Retrieval modes:  {s['retrieval_modes']}")
             print()
@@ -262,15 +264,18 @@ if __name__ == "__main__":
         db.add_message(conv_id, "user", SimpleRAG._sanitize(q))
         db.add_message(conv_id, "assistant", SimpleRAG._sanitize(answer))
 
-        # Log to query_logs (sanitize in case API returned surrogates)
+        # Log to query_logs
         info = rag._last_query_info
-        db.log_query(
+        error = info.get("error", "")
+        qid = db.log_query(
             question=SimpleRAG._sanitize(q),
             answer=SimpleRAG._sanitize(answer),
             mode=info.get("mode", ""),
             hit_files=info.get("hit_files", ""),
             rewrite=info.get("rewrite", ""),
             latency_ms=elapsed_ms,
+            session_id=conv_id,
+            error=error,
         )
 
         print(f"\n{answer}\n")
