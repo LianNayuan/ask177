@@ -82,7 +82,11 @@
       "Bash(python server.py --port 8000 --mode tfidf)",
       "Bash(python stress_test.py --concurrency 5)",
       "Bash(python stress_test.py --concurrency 5 --output stress_report.md)",
-      "Bash(taskkill //F //PID 84160)"
+      "Bash(taskkill //F //PID 84160)",
+      "Bash(python -c \"import jieba; print\\('jieba OK'\\)\")",
+      "Bash(.venv/Scripts/python -c \"import setuptools; print\\(setuptools.__version__\\)\")",
+      "Bash(.venv/Scripts/python -c \"import simple_rag; print\\('OK - no warning'\\)\")",
+      "Bash(.venv/Scripts/python -c \"import jieba; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "\\tmp"

@@ -11,13 +11,15 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import jieba
 from openai import APIConnectionError, OpenAI
 
 
 # ── TF-IDF Retriever ──────────────────────────────────────────────
 
 class TfidfRetriever:
-    """Minimal TF-IDF retriever — no external ML dependencies."""
+    """TF-IDF retriever with mixed-granularity tokenization:
+    jieba word-level + character bigram + unigram for CJK, \\w+ for others."""
 
     def __init__(self, chunks: list[str]):
         self.chunks = chunks
@@ -30,18 +32,26 @@ class TfidfRetriever:
     _CJK_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]+")
 
     def _tokenize(self, text: str) -> list[str]:
-        """Tokenize text: character bigrams for CJK, \\w+ for others."""
+        """Mixed-granularity tokenization:
+        - jieba word segmentation for CJK (word-level)
+        - character bigrams (sub-word, catches partial matches)
+        - unigrams (character-level, catches abbreviations)
+        - \\w+ for non-CJK text
+        """
         tokens: list[str] = []
         pos = 0
         for m in self._CJK_RE.finditer(text):
             # Non-CJK part before this CJK span
             if m.start() > pos:
                 tokens.extend(re.findall(r"\w+", text[pos:m.start()].lower()))
-            # CJK span → character bigrams
+            # CJK span → jieba words + character bigrams + unigrams
             cjk = m.group()
+            # Word-level: jieba precise mode
+            tokens.extend(jieba.lcut(cjk, cut_all=False))
+            # Sub-word: character bigrams for partial-match coverage
             for i in range(len(cjk) - 1):
                 tokens.append(cjk[i:i + 2])
-            # Also add unigrams for single-char matches (names, etc.)
+            # Character-level: unigrams for abbreviation matching
             tokens.extend(cjk)
             pos = m.end()
         # Remaining non-CJK tail
