@@ -1053,6 +1053,24 @@ class SimpleRAG:
                     if canonical and nick != canonical:
                         self._matched_nicknames[nick] = canonical
                     break
+
+        # Expand to cross-language counterparts: if a matched file has a
+        # canonical title that appears as a nickname of another file, include
+        # that file too (e.g. 三发猎鱼弓.md matched → also Tri-Stringer.md)
+        if matches:
+            expanded: set[str] = set()
+            for matched_fname in list(matches):
+                canonical = self._titles.get(matched_fname, "")
+                if not canonical:
+                    continue
+                for fname, nicks in self._nicknames.items():
+                    if fname in matches:
+                        continue
+                    if canonical in nicks or any(canonical == n for n in nicks):
+                        expanded.add(fname)
+                        self._log(f"[Title match] cross-language: {matched_fname} → {fname}")
+            matches |= expanded
+
         return matches if matches else None
 
     def _rewrite_with_context(self, question: str,
@@ -1338,10 +1356,24 @@ class SimpleRAG:
         search_query = self._rewrite_with_context(question, history)
         # Then apply glossary rules (lightweight, no API call)
         search_query = self._rewrite_query(search_query)
+
+        # ── Stage 1.5: Capture nickname disambiguation BEFORE nickname
+        # rewrite clobbers the original terms ────────────────────────
+        # _rewrite_nicknames will replace "长弓" → "三发猎鱼弓", so we
+        # need to save _matched_nicknames from the original question first.
+        self._find_relevant_files(question)  # populates _matched_nicknames
+        disambig_nicknames = dict(self._matched_nicknames)
+
+        # Now apply deterministic nickname → canonical replacements
         search_query = self._rewrite_nicknames(search_query)
 
         # ── Stage 2: File matching & retrieval ────────────────────
-        relevant = self._find_relevant_files(search_query) or self._find_relevant_files(question)
+        relevant = self._find_relevant_files(search_query)
+        if not relevant:
+            relevant = self._find_relevant_files(question)
+
+        # Restore the original-question nicknames for disambiguation
+        self._matched_nicknames = disambig_nicknames
 
         # Always include the nickname reference file
         for ref in self._file_names:

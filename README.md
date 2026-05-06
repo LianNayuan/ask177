@@ -4,8 +4,10 @@
 
 ## 功能特性
 
-- **知识库**：170+ 把武器的完整资料（伤害、射程、技能等），中英双语检索，支持俗称/口语化改写
-- **智能检索**：TF-IDF + 稠密向量混合检索，文件名/俗称匹配，跨文件综合回答
+- **知识库**：360+ 把武器的完整资料（中英双语），支持俗称/口语化改写，自动识别昵称消歧义
+- **智能检索**：混合粒度分词（jieba 词级 + bigram + unigram）+ TF-IDF + 稠密向量混合检索，文件名/俗称匹配，跨语言文件自动扩展
+- **Agentic RAG**：LLM 自主判断是否需要换关键词再次检索、全库穷举、或追问用户，最多 4 轮迭代
+- **穷举模式**：检测到"哪些武器有 X"类枚举问题时自动触发全库 TF-IDF 扫描
 - **三种使用方式**：命令行问答 / HTTP API / 独立 .exe 文件
 - **增量构建**：修改知识文件后只重处理变化的文件
 - **一键部署**：本地构建索引 → 打包成 .exe → 复制到任意机器运行
@@ -24,23 +26,35 @@
                ▼
 ┌──────────────────────────────────────────┐
 │  SimpleRAG (simple_rag.py)                │
+│  ├─ 安全防护（注入检测 + PII 脱敏）        │
 │  ├─ LLM 上下文查询改写 (多轮对话)          │
 │  ├─ 口语改写 (glossary.md)                │
+│  ├─ 昵称改写（367 武器 × N 个昵称，确定性） │
+│  ├─ 昵称消歧义（注入提示词纠正 LLM 混淆）   │
 │  ├─ 文件名/俗称匹配 → 缩小检索范围        │
+│  ├─ 跨语言文件扩展（中英互补）             │
 │  ├─ TF-IDF 检索 (TfidfRetriever)          │
-│  ├─ 稠密向量检索 (DenseRetriever)          │
+│  │   └─ 混合粒度分词：jieba + bigram + unigram │
+│  ├─ 稠密向量检索 (DenseRetriever/ChromaDB) │
+│  ├─ Agentic RAG 决策循环 (最多 4 轮)       │
+│  │   ├─ 能回答 → 输出答案                 │
+│  │   ├─ 信息不够 → SEARCH: 新查询词       │
+│  │   ├─ 枚举问题 → EXHAUST: 全库扫描       │
+│  │   └─ 问题模糊 → 追问用户               │
 │  └─ DeepSeek API 生成答案                 │
 └──────────────┬───────────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────────┐
-│  知识库 (knowledge/wiki_cn/*.md)          │
-│  167 个武器 .md 文件 + glossary.md        │
+│  知识库 (knowledge/wiki_cn/*.md           │
+│         + knowledge/wiki_en/*.md)         │
+│  167 + 188 = 355 个武器 .md 文件           │
+│  + glossary.md + 武器俗称及来源.md        │
 │                      │                    │
 │  离线预处理                                │
 │  build_tfidf.py       → TF-IDF 索引         │
 │  build_embeddings.py → 稠密向量           │
-│  合并保存到 index.pkl                     │
+│  合并保存到 index.pkl + data.db           │
 └──────────────────────────────────────────┘
 ```
 
@@ -160,6 +174,7 @@ python build_glossary.py --dry-run    # 预览
 | `-q` | 安静模式，只输出答案，不打印日志 |
 | `--mode <mode>` | 检索模式：`tfidf` / `dense` / `hybrid`（默认 hybrid） |
 | `--dense-weight <n>` | 混合检索中稠密向量的权重，0.0~1.0（默认 0.5） |
+| `--agentic` | 启用 Agentic RAG：LLM 自主判断是否需要多次检索 |
 
 ```
 交互命令：
@@ -182,6 +197,7 @@ python ask.py -q                             # 安静模式
 python ask.py --mode tfidf                   # 纯 TF-IDF 检索
 python ask.py --mode dense                   # 纯向量检索
 python ask.py --mode hybrid --dense-weight 0.7  # 混合检索，调高向量权重
+python ask.py --agentic                      # Agentic RAG 模式
 ```
 
 ### server.py — HTTP API
@@ -193,6 +209,7 @@ python ask.py --mode hybrid --dense-weight 0.7  # 混合检索，调高向量权
 | `--cache <path>` | 索引文件路径，默认 `index.pkl` |
 | `--mode <mode>` | 检索模式：`tfidf` / `dense` / `hybrid`（默认 hybrid） |
 | `--dense-weight <n>` | 混合检索中稠密向量的权重，0.0~1.0（默认 0.5） |
+| `--agentic` | 启用 Agentic RAG：LLM 自主判断是否需要多次检索 |
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -205,6 +222,7 @@ python server.py                                  # 默认 0.0.0.0:8000
 python server.py --host 127.0.0.1 --port 8080     # 仅本地
 python server.py --cache /path/to/index.pkl       # 指定索引文件
 python server.py --mode dense                     # 纯向量检索模式
+python server.py --agentic                        # Agentic RAG 模式
 
 # 测试
 curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question":"斯普拉滚筒的伤害"}'
@@ -293,7 +311,7 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 
 | 文件 | 说明 |
 |------|------|
-| `simple_rag.py` | RAG 核心引擎：LLM 查询改写 + TF-IDF + 稠密向量检索 + DeepSeek 问答 |
+| `simple_rag.py` | RAG 核心引擎：安全防护 + LLM 查询改写 + 混合粒度分词 + 昵称消歧义 + TF-IDF + 稠密向量检索 + Agentic RAG 决策循环 + DeepSeek 问答 |
 | `database.py` | SQLite 数据库：问答日志 + 俗称映射 + 会话历史 + 知识元数据 |
 | `build_tfidf.py` | TF-IDF 关键词索引构建（支持增量更新） |
 | `build_embeddings.py` | 稠密向量索引构建（本地模型 / API / ChromaDB） |
@@ -310,12 +328,15 @@ python crawl.py 1-300 knowledge/wiki_cn       # 指定输出目录
 ## 当前的 todo
 
 - [ ] 知识库内容还需要校对（部分武器数据可能有误）
-- [ ] 补充所有武器的配置文件（目前 173 把，仍需补充）
-- [x] 支持多轮对话（LLM 上下文查询改写 + SQLite 会话管理）
+- [ ] 补充所有武器的配置文件（目前 355 把，仍需补充）
 - [ ] 支持动态维护 glossary（在多轮对话中自动学习俗称映射）
+- [ ] 参考 [小鱿鱿](https://github.com/Cypas/splatoon3-schedule) 的翻译数据，丰富知识来源
+- [x] 支持多轮对话（LLM 上下文查询改写 + SQLite 会话管理）
 - [x] 引入向量检索（TF-IDF + 稠密向量混合检索，支持本地模型微调）
 - [x] 引入 SQLite 数据库（问答日志 + 俗称映射 + 会话历史 + 知识元数据）
-- [ ] 参考 [小鱿鱿](https://github.com/Cypas/splatoon3-schedule) 的翻译数据，丰富知识来源
+- [x] 混合粒度分词（jieba 词级 + bigram + unigram）
+- [x] Agentic RAG（LLM 自主判断 SEARCH/EXHAUST/回答/追问，最多 4 轮迭代）
+- [x] 昵称消歧义 + 跨语言文件扩展
 
 ## 数据来源
 
