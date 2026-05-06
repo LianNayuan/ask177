@@ -50,7 +50,8 @@ def create_app():
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "files": len(rag._file_names), "chunks": len(rag._chunks)}
+        return {"status": "ok", "files": len(rag._file_names),
+                "chunks": len(rag._chunks), "agentic": rag._agentic}
 
     @app.post("/ask", response_model=AnswerResponse)
     def ask(req: QuestionRequest):
@@ -130,6 +131,7 @@ if __name__ == "__main__":
     cache_file = CACHE_FILE
     retrieval_mode = "hybrid"
     dense_weight = 0.5
+    agentic = False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -154,6 +156,9 @@ if __name__ == "__main__":
                 print(f"Invalid --dense-weight: {dense_weight}. Must be 0.0 - 1.0")
                 sys.exit(1)
             i += 2
+        elif args[i] == "--agentic":
+            agentic = True
+            i += 1
         else:
             print(f"Unknown argument: {args[i]}")
             sys.exit(1)
@@ -166,7 +171,8 @@ if __name__ == "__main__":
     # Load index (force=True skips freshness check — no source .md files needed)
     rag = SimpleRAG(api_key=API_KEY, verbose=False,
                     retrieval_mode=retrieval_mode,
-                    dense_weight=dense_weight)
+                    dense_weight=dense_weight,
+                    agentic=agentic)
     if not rag.load_cache(cache_file, force=True, db=db):
         print(f"Error: {cache_file} not found and no knowledge in data.db.")
         print("Build it locally: python build_tfidf.py")

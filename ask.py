@@ -49,6 +49,7 @@ if __name__ == "__main__":
     debug_chunks = False
     retrieval_mode = "hybrid"
     dense_weight = 0.5
+    agentic = False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -58,6 +59,9 @@ if __name__ == "__main__":
             i += 1
         elif a == "-q":
             verbose = False
+            i += 1
+        elif a == "--agentic":
+            agentic = True
             i += 1
         elif a == "--mode" and i + 1 < len(args):
             retrieval_mode = args[i + 1]
@@ -89,7 +93,8 @@ if __name__ == "__main__":
 
     rag = SimpleRAG(api_key=API_KEY, verbose=verbose,
                     retrieval_mode=retrieval_mode,
-                    dense_weight=dense_weight)
+                    dense_weight=dense_weight,
+                    agentic=agentic)
 
     if not rag.load_cache(CACHE_FILE, db=db):
         print("No cache found. Run build_tfidf.py first.")
@@ -133,7 +138,8 @@ if __name__ == "__main__":
         return [{"role": r["role"], "content": r["content"]} for r in rows]
 
     
-    print(f"\n=== RAG Q&A (DeepSeek) ===\n"
+    agentic_tag = " [agentic]" if agentic else ""
+    print(f"\n=== RAG Q&A (DeepSeek){agentic_tag} ===\n"
           f"{len(rag._file_names)} files, {len(rag._chunks)} chunks\n"
           f"Retrieval: {mode}\n"
           f"Session #{conv_id}{resume_info}\n"
